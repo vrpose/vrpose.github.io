@@ -83,11 +83,19 @@ export interface CalibrationMessage extends BaseMessage {
   note?: string;
 }
 
-/** Either direction. Human-readable state updates. */
+/** Either direction. Human-readable state updates, plus optional telemetry.
+ * Used by the viewer (Quest) to report back to the camera (phone) what it
+ * computed locally: the estimated real height (from the auto-calibrated scale)
+ * and the RTT it measured. These are informational; the phone just displays
+ * them. All numeric fields are optional and backward-compatible. */
 export interface StatusMessage extends BaseMessage {
   t: "status";
   state: string;
   detail?: string;
+  /** Estimated real body height in meters (model span × applied scale). */
+  heightM?: number;
+  /** Round-trip time (ms) measured on the sender's own clock. */
+  rttMs?: number;
 }
 
 export interface PingMessage extends BaseMessage {
@@ -132,8 +140,15 @@ export function helloAck(accepted: boolean, reason?: string): HelloAckMessage {
   return { v: PROTOCOL_VERSION, t: "hello-ack", accepted, reason };
 }
 
-export function status(state: string, detail?: string): StatusMessage {
-  return { v: PROTOCOL_VERSION, t: "status", state, detail };
+export function status(
+  state: string,
+  detail?: string,
+  extra?: { heightM?: number; rttMs?: number },
+): StatusMessage {
+  const msg: StatusMessage = { v: PROTOCOL_VERSION, t: "status", state, detail };
+  if (extra?.heightM !== undefined) msg.heightM = extra.heightM;
+  if (extra?.rttMs !== undefined) msg.rttMs = extra.rttMs;
+  return msg;
 }
 
 export function ping(): PingMessage {

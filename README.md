@@ -112,7 +112,10 @@ Pantalla inicial con dos opciones.
 6. Estados: *esperando visor → conectado → transmitiendo → conexión perdida*.
 7. Métricas: **FPS de inferencia**, **Hz de envío**, **estado de conexión**,
    **visibilidad media** de articulaciones, **paquetes descartados** y aviso de
-   **cuerpo fuera de encuadre**.
+   **cuerpo fuera de encuadre**. Además, el visor devuelve por el mismo canal su
+   **altura estimada** y el **RTT** que mide, que el celular muestra como
+   *Altura estimada (visor)* y *RTT (visor)* (telemetría informativa; mensajes
+   `status`).
 8. Se intenta **mantener la pantalla encendida** (Screen Wake Lock; si no está
    disponible, simplemente no se activa).
 
@@ -155,16 +158,23 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
   se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
   - El **eje vertical se fija al "arriba" real** (gravedad, del giroscopio del
     visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
-  - La orientación es **solo yaw** (hacia dónde mirás); mirar hacia abajo o
-    inclinar la cabeza no tumba la figura.
-  - Se ancla la **cabeza del esqueleto a la posición del visor**, así el **core
-    queda siempre por debajo** cuando estás parado. Si el pose estimator te ve
-    **acostado**, la figura se muestra acostada (esa inclinación vive en la pose
-    articulada, no en el anclaje).
+  - La **orientación (yaw) se captura una sola vez** al calibrar y **se
+    mantiene**: girar o inclinar la cabeza **ya no rota el cuerpo** (eso era el
+    efecto "cuello ortopédico"). Mirá al frente al pulsar **D** para fijarla;
+    recalibrás cuando quieras.
+  - El cuerpo se **ancla horizontalmente al centro de la cadera** (el *core*,
+    que es estable), no a la cabeza, así mover o girar la cabeza **no hace
+    bailar los pies**. La altura de la cabeza sí se alinea con el visor, de modo
+    que el **core queda siempre por debajo** cuando estás parado. Si el pose
+    estimator te ve **acostado**, la figura se muestra acostada (esa inclinación
+    vive en la pose articulada, no en el anclaje).
+  - La posición del ancla está **suavizada (paso bajo, ~0,5 s)**: los
+    movimientos rápidos de cabeza se amortiguan, pero si caminás el cuerpo te
+    acompaña.
   - La **escala se calibra una sola vez** con cabeza + ambas manos (no
     continuamente, que era lo que metía ruido). Mostrá ambas manos al visor;
-    recalibrás cuando quieras con **D · Capturar escala**. La escala es
-    invariante a la rotación, por eso es estable aunque muevas los brazos.
+    recalibrás cuando quieras con **D**. La escala es invariante a la rotación,
+    por eso es estable aunque muevas los brazos.
   - Ajuste fino opcional: *Escala*, *Altura*, *Adelante/atrás*. No hace falta
     marcar el celular.
 - **Espejo (enfrente)**: la figura se coloca entre vos y el celular, como un

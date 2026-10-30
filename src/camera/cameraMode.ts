@@ -34,6 +34,9 @@ interface CamState {
   sendHzActual: number;
   avgVisibility: number;
   inFrame: boolean;
+  /** Telemetry reported back by the viewer (Quest) over the DataChannel. */
+  viewerHeightM: number | null;
+  viewerRttMs: number | null;
 }
 
 export function mountCamera(container: HTMLElement, route: Route): () => void {
@@ -53,6 +56,8 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
     sendHzActual: 0,
     avgVisibility: 0,
     inFrame: false,
+    viewerHeightM: null,
+    viewerRttMs: null,
   };
 
   const video = el("video", { playsinline: true, muted: true }) as HTMLVideoElement;
@@ -346,6 +351,12 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
       case "ping":
         l.send(pong(m.tSent));
         break;
+      case "status":
+        // Viewer telemetry (estimated height / RTT it measured). Display only.
+        if (m.heightM !== undefined) state.viewerHeightM = m.heightM;
+        if (m.rttMs !== undefined) state.viewerRttMs = m.rttMs;
+        renderMetrics();
+        break;
       case "reset":
         state.seq = 0;
         break;
@@ -409,6 +420,8 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
       metric("Visibilidad media", state.avgVisibility.toFixed(2)),
       metric("Paquetes descartados", String(dropped)),
       metric("Encuadre", state.inFrame ? "OK" : "fuera"),
+      metric("Altura estimada (visor)", state.viewerHeightM == null ? "—" : `${state.viewerHeightM.toFixed(2)} m`),
+      metric("RTT (visor)", state.viewerRttMs == null ? "—" : `${state.viewerRttMs.toFixed(0)} ms`),
     );
     warnHost.replaceChildren(
       state.phase !== "idle" && !state.inFrame

@@ -9,10 +9,10 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { buildMirrorFrame, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
+import { buildMirrorFrame, measureModelHeight, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
 import { LM, POSE_LANDMARK_COUNT } from "../pose/landmarks";
 import { parsePairingUrl } from "./pairing";
-import { hello, ping, reset, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
+import { hello, ping, reset, status, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
 
 export function mountQuest(container: HTMLElement, route: Route): () => void {
   const cfg = resolveConfig(route.params);
@@ -51,6 +51,17 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   // and both wrists↔tracked hands). Only the rotation-invariant SCALE is kept;
   // orientation is derived from the headset (gravity up + yaw) each frame.
   const auto = { scale: 1, has: false };
+
+  // World anchor for the overlay figure, captured ONCE (at placement / D) and
+  // then held. The body yaw is frozen so turning or tilting your head no longer
+  // rotates the figure (this was the "neck brace" effect), and the position is
+  // low-pass filtered so quick head motion is damped while slow body translation
+  // (walking) still tracks. Recalibrate to re-aim/re-center.
+  const anchor = { pos: new Vector3(), quat: new Quaternion(), has: false, posInit: false, lastT: 0 };
+  function resetAnchor(): void {
+    anchor.has = false;
+    anchor.posInit = false;
+  }
 
   function togglePanel(): void {
     if (!controlPanel) return;
@@ -337,42 +348,86 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     }
     skeleton.setGlobalOpacity(1);
     const mapped = mapper.map(buffered.pose, cal, tSec);
-    // Overlay placement needs the mapped pose (to anchor the head joint), so it
+    // Overlay placement needs the mapped pose (to anchor to the body), so it
     // runs after mapping and before the skeleton update.
-    if (placement.mode === "overlay") placeOverlay(mapped.positions);
+    if (placement.mode === "overlay") placeOverlay(mapped.positions, tSec);
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
-  // Overlay placement (stable, never upside-down):
+  // Overlay placement (stable, never upside-down, no "neck brace"):
   //  - Vertical axis is locked to world up (gravity, from the headset). We never
-  //    apply the solved rotation, so the figure can't flip (no "feet on ceiling").
-  //  - Orientation is yaw only (where you look); pitch/roll never tip the figure.
-  //  - The figure's HEAD joint is anchored to the headset position, so the core
-  //    stays BELOW the headset when the pose is standing, and the figure lies
-  //    down when the pose lies down (that tilt lives in the articulated pose).
-  //  - Scale is calibrated ONCE from head+hands (see calibrateScale); not every
-  //    frame, which was the source of jitter.
-  function placeOverlay(positions: (Vector3 | null)[]): void {
+  //    apply a solved rotation, so the figure can't flip (no "feet on ceiling").
+  //  - Yaw is captured ONCE (at placement / D) and HELD. Turning or tilting your
+  //    head no longer rotates the body — that rigid coupling was the neck brace.
+  //  - Horizontal position is anchored to the stable HIP CENTRE (the body core),
+  //    not the head, so head bobbing/looking around doesn't swing the feet. The
+  //    head height is still matched to the headset so the core sits BELOW it.
+  //  - The anchor position is low-pass filtered: quick head motion is damped,
+  //    slow body translation (walking) still tracks over ~0.5 s.
+  //  - Scale is calibrated ONCE from head+hands (see calibrateScale), not per
+  //    frame. Lying down etc. lives in the articulated pose, not in placement.
+  const UP = new Vector3(0, 1, 0);
+  function placeOverlay(positions: (Vector3 | null)[], tSec: number): void {
     if (!scene || !skeleton) return;
     if (!auto.has) calibrateScale(); // one-shot until it succeeds
     const s = auto.scale * placement.scale;
     const vp = scene.readViewerPose();
-    const q = yawFacing(vp.forwardXZ);
-    if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), placement.yaw));
+
+    // Capture (and freeze) the body yaw the first time we place it.
+    if (!anchor.has) {
+      anchor.quat = yawFacing(vp.forwardXZ);
+      anchor.has = true;
+      anchor.posInit = false;
+      anchor.lastT = tSec;
+    }
+    const q = anchor.quat.clone();
+    if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(UP, placement.yaw));
     skeleton.root.quaternion.copy(q);
     skeleton.root.scale.setScalar(s);
 
     const localHead = positions[LM.NOSE];
-    if (localHead) {
-      // world_head = position + q·(s·localHead)  ⇒  position = headset − q·(s·localHead)
-      const offset = localHead.clone().multiplyScalar(s).applyQuaternion(q);
-      skeleton.root.position.copy(vp.position).sub(offset);
-      skeleton.root.position.y += placement.height; // optional manual nudge
-      if (placement.forward) {
-        skeleton.root.position.x += vp.forwardXZ.x * placement.forward;
-        skeleton.root.position.z += vp.forwardXZ.z * placement.forward;
-      }
+    if (!localHead) return;
+    // Stable horizontal reference: hip centre (falls back to head if missing).
+    const lHip = positions[LM.LEFT_HIP];
+    const rHip = positions[LM.RIGHT_HIP];
+    const localCore = lHip && rHip ? lHip.clone().add(rHip).multiplyScalar(0.5) : localHead.clone();
+
+    // Solve the root so the figure's CORE sits under the headset horizontally and
+    // its HEAD sits at the headset height:
+    //   world = pos + q·(s·local)  ⇒  pos = anchorWorld − q·(s·localRef)
+    const wCore = localCore.clone().multiplyScalar(s).applyQuaternion(q);
+    const wHead = localHead.clone().multiplyScalar(s).applyQuaternion(q);
+    const target = new Vector3(
+      vp.position.x - wCore.x,
+      vp.position.y - wHead.y + placement.height,
+      vp.position.z - wCore.z,
+    );
+    if (placement.forward) {
+      const fwd = new Vector3(0, 0, 1).applyQuaternion(q);
+      target.x += fwd.x * placement.forward;
+      target.z += fwd.z * placement.forward;
     }
+
+    if (!anchor.posInit) {
+      anchor.pos.copy(target);
+      anchor.posInit = true;
+    } else {
+      const dt = Math.max(0, Math.min(0.1, tSec - anchor.lastT));
+      const tau = 0.5; // seconds; larger = steadier, laggier
+      anchor.pos.lerp(target, 1 - Math.exp(-dt / tau));
+    }
+    anchor.lastT = tSec;
+    skeleton.root.position.copy(anchor.pos);
+  }
+
+  /** Estimated real body height (m): model vertical span × the applied scale. */
+  function estimatedHeightM(): number | null {
+    if (!auto.has) return null;
+    const wl = buffer.peek()?.pose.worldLandmarks;
+    if (!wl) return null;
+    const span = measureModelHeight(wl);
+    if (!(span > 1e-3)) return null;
+    return span * auto.scale * placement.scale;
   }
 
   // One-shot scale from the 3-point correspondence (head + both wrists). Only
@@ -467,6 +522,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
         cal.lateralEnabled = false;
         cal.mirror = false;
         auto.has = false; // re-solve from the 3 points
+        resetAnchor(); // re-aim yaw + re-center on next placement
       } else {
         cal.mirror = true; // mirror reflection; scale/floor come from D capture
       }
@@ -492,7 +548,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       slider("Escala", 0.5, 1.8, 0.01, placement.scale, (v) => { placement.scale = v; recomputeFrame(); }),
       slider("Rotación (rad)", -Math.PI, Math.PI, 0.02, placement.yaw, (v) => { placement.yaw = v; recomputeFrame(); }),
       el("div", { class: "row" }, [
-        el("button", { class: "secondary", onclick: () => void captureReference() }, ["D · Capturar escala (parado)"]),
+        el("button", { class: "secondary", onclick: () => void captureReference() }, ["D · Calibrar (parado, mirá al frente)"]),
         el("label", {}, ["Altura real (m)", numInput(1.7, 1.2, 2.2, 0.01, (h) => (userHeightM = h))]),
       ]),
       el("div", { class: "row" }, [
@@ -509,16 +565,23 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     // live metrics in overlay
     const mTimer = window.setInterval(() => {
       const host2 = panel.querySelector("#ql-metrics");
-      if (!host2) return;
       const age = buffer.ageMs(nowEpochMs());
       const r = rtt.rttMs;
+      const h = estimatedHeightM();
       const stats = buffer.stats;
-      host2.replaceChildren(
-        metric("RTT", r == null ? "—" : `${r.toFixed(0)} ms`),
-        metric("Antigüedad pose (local)", Number.isFinite(age) ? `${age.toFixed(0)} ms` : "—"),
-        metric("Aceptadas", String(stats.accepted)),
-        metric("Rechazadas (viejas)", String(stats.rejected)),
-      );
+      if (host2) {
+        host2.replaceChildren(
+          metric("RTT", r == null ? "—" : `${r.toFixed(0)} ms`),
+          metric("Altura estimada", h == null ? "—" : `${h.toFixed(2)} m`),
+          metric("Antigüedad pose (local)", Number.isFinite(age) ? `${age.toFixed(0)} ms` : "—"),
+          metric("Aceptadas", String(stats.accepted)),
+          metric("Rechazadas (viejas)", String(stats.rejected)),
+        );
+      }
+      // Report what the viewer computed back to the phone over the same channel.
+      if (link?.state === "open") {
+        link.send(status("metrics", undefined, { heightM: h ?? undefined, rttMs: r ?? undefined }));
+      }
     }, 500);
     overlayTimers.push(mTimer);
   }
@@ -547,10 +610,11 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   function captureReference(): void {
     if (placement.mode === "overlay") {
-      // Recalibrate scale once from head + both hands.
+      // Full recalibrate: re-solve scale from head + both hands AND re-aim/re-center.
       auto.has = false;
+      resetAnchor();
       const ok = calibrateScale();
-      toast(ok ? `Escala calibrada ×${auto.scale.toFixed(2)}.` : "Mostrá ambas manos al visor para calibrar.");
+      toast(ok ? `Escala ×${auto.scale.toFixed(2)}. Mirá al frente: fija orientación.` : "Mostrá ambas manos al visor para calibrar.");
       return;
     }
     const buffered = buffer.peek();

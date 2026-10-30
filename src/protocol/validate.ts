@@ -64,7 +64,10 @@ export function parseMessage(raw: unknown): ProtocolMessage | null {
     case "pong":
       return isFiniteNumber(obj.tSent) ? (obj as unknown as ProtocolMessage) : null;
     case "status":
-      return typeof obj.state === "string" ? (obj as unknown as ProtocolMessage) : null;
+      if (typeof obj.state !== "string") return null;
+      if (obj.heightM !== undefined && !isFiniteNumber(obj.heightM)) return null;
+      if (obj.rttMs !== undefined && !isFiniteNumber(obj.rttMs)) return null;
+      return obj as unknown as ProtocolMessage;
     case "calibration":
       if (obj.userHeightM !== undefined && !isFiniteNumber(obj.userHeightM)) return null;
       return obj as unknown as ProtocolMessage;
