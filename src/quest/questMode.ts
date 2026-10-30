@@ -47,9 +47,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let controlPanel: HTMLElement | null = null;
   let arOverlayRoot: HTMLElement | null = null;
 
-  // Auto-calibration (overlay): similarity transform solved from 3 point
-  // correspondences — head↔headset and both wrists↔tracked hands — smoothed.
-  const auto = { pos: new Vector3(), quat: new Quaternion(), scale: 1, has: false };
+  // Overlay scale, calibrated once from 3 point correspondences (head↔headset
+  // and both wrists↔tracked hands). Only the rotation-invariant SCALE is kept;
+  // orientation is derived from the headset (gravity up + yaw) each frame.
+  const auto = { scale: 1, has: false };
 
   function togglePanel(): void {
     if (!controlPanel) return;
@@ -327,9 +328,6 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   function renderFrame(tSec: number): void {
     if (!scene || !skeleton) return;
-    // In "overlay" mode the figure is anchored to the headset every frame so it
-    // tracks your real position/orientation in the room (6DoF from WebXR).
-    if (placement.mode === "overlay") updateOverlayPlacement();
     const buffered = buffer.peek();
     const age = buffer.ageMs(nowEpochMs());
     if (!buffered || age > cfg.maxPoseAgeMs) {
@@ -339,76 +337,70 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     }
     skeleton.setGlobalOpacity(1);
     const mapped = mapper.map(buffered.pose, cal, tSec);
+    // Overlay placement needs the mapped pose (to anchor the head joint), so it
+    // runs after mapping and before the skeleton update.
+    if (placement.mode === "overlay") placeOverlay(mapped.positions);
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
-  // Overlay placement: prefer the auto-calibration (head + both wrists). While
-  // the 3 points are unavailable, fall back to a simple head anchor.
-  function updateOverlayPlacement(): void {
+  // Overlay placement (stable, never upside-down):
+  //  - Vertical axis is locked to world up (gravity, from the headset). We never
+  //    apply the solved rotation, so the figure can't flip (no "feet on ceiling").
+  //  - Orientation is yaw only (where you look); pitch/roll never tip the figure.
+  //  - The figure's HEAD joint is anchored to the headset position, so the core
+  //    stays BELOW the headset when the pose is standing, and the figure lies
+  //    down when the pose lies down (that tilt lives in the articulated pose).
+  //  - Scale is calibrated ONCE from head+hands (see calibrateScale); not every
+  //    frame, which was the source of jitter.
+  function placeOverlay(positions: (Vector3 | null)[]): void {
     if (!scene || !skeleton) return;
-    tryAutoCalibrate();
-    if (auto.has) {
-      skeleton.root.position.copy(auto.pos);
+    if (!auto.has) calibrateScale(); // one-shot until it succeeds
+    const s = auto.scale * placement.scale;
+    const vp = scene.readViewerPose();
+    const q = yawFacing(vp.forwardXZ);
+    if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), placement.yaw));
+    skeleton.root.quaternion.copy(q);
+    skeleton.root.scale.setScalar(s);
+
+    const localHead = positions[LM.NOSE];
+    if (localHead) {
+      // world_head = position + q·(s·localHead)  ⇒  position = headset − q·(s·localHead)
+      const offset = localHead.clone().multiplyScalar(s).applyQuaternion(q);
+      skeleton.root.position.copy(vp.position).sub(offset);
       skeleton.root.position.y += placement.height; // optional manual nudge
-      skeleton.root.quaternion.copy(auto.quat);
-      skeleton.root.scale.setScalar(auto.scale * placement.scale);
-    } else {
-      anchorOverlay();
+      if (placement.forward) {
+        skeleton.root.position.x += vp.forwardXZ.x * placement.forward;
+        skeleton.root.position.z += vp.forwardXZ.z * placement.forward;
+      }
     }
   }
 
-  // Solve the similarity transform whenever head + both wrists are available,
-  // and smooth it so arm motion doesn't make the figure jump/balloon.
-  function tryAutoCalibrate(): void {
-    if (!scene) return;
+  // One-shot scale from the 3-point correspondence (head + both wrists). Only
+  // the SCALE is used (it is rotation-invariant and stable); the noisy solved
+  // rotation/translation are discarded. Call on demand, not every frame.
+  function calibrateScale(): boolean {
+    if (!scene) return false;
     const buffered = buffer.peek();
     const wl = buffered?.pose.worldLandmarks;
-    if (!wl || wl.length < POSE_LANDMARK_COUNT) return;
+    if (!wl || wl.length < POSE_LANDMARK_COUNT) return false;
     const lw = scene.wristWorld("left");
     const rw = scene.wristWorld("right");
-    if (!lw || !rw) return; // need the 3 points (head is always available)
-
+    if (!lw || !rw) return false; // need both hands tracked
     const head = scene.readViewerPose().position;
     const localHead = worldLandmarkToLocal(wl[LM.NOSE], cal.mirror);
     const localL = worldLandmarkToLocal(wl[LM.LEFT_WRIST], cal.mirror);
     const localR = worldLandmarkToLocal(wl[LM.RIGHT_WRIST], cal.mirror);
     const t = similarityFrom3Points([localHead, localL, localR], [head, lw, rw]);
-    if (!t) return;
-    const scale = Math.min(2.5, Math.max(0.3, t.scale)); // guard against spikes
-
-    if (!auto.has) {
-      auto.pos.copy(t.position);
-      auto.quat.copy(t.quaternion);
-      auto.scale = scale;
-      auto.has = true;
-    } else {
-      auto.pos.lerp(t.position, 0.2);
-      auto.quat.slerp(t.quaternion, 0.2);
-      auto.scale += (scale - auto.scale) * 0.12;
-    }
-  }
-
-  // Fallback head anchor (used until the auto-calibration has the 3 points).
-  function anchorOverlay(): void {
-    if (!scene || !skeleton) return;
-    const vp = scene.readViewerPose();
-    const fwd = vp.forwardXZ;
-    skeleton.root.position.set(
-      vp.position.x + fwd.x * placement.forward,
-      scene.floorY + placement.height,
-      vp.position.z + fwd.z * placement.forward,
-    );
-    const q = yawFacing(fwd);
-    if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), placement.yaw));
-    skeleton.root.quaternion.copy(q);
-    skeleton.root.scale.setScalar(placement.scale);
+    if (!t) return false;
+    auto.scale = Math.min(2.5, Math.max(0.3, t.scale));
+    auto.has = true;
+    return true;
   }
 
   function recomputeFrame(): void {
     if (!scene || !skeleton) return;
     if (placement.mode === "overlay") {
-      updateOverlayPlacement();
-      return;
+      return; // overlay is placed per-frame in placeOverlay()
     }
     if (!userPos || !phonePos) return;
     const frame = buildMirrorFrame({
@@ -555,7 +547,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   function captureReference(): void {
     if (placement.mode === "overlay") {
-      toast("En 'Sobre mí' la escala se calcula automáticamente con las manos.");
+      // Recalibrate scale once from head + both hands.
+      auto.has = false;
+      const ok = calibrateScale();
+      toast(ok ? `Escala calibrada ×${auto.scale.toFixed(2)}.` : "Mostrá ambas manos al visor para calibrar.");
       return;
     }
     const buffered = buffer.peek();

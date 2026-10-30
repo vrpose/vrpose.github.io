@@ -152,19 +152,21 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
 **Dos modos de colocación** (botón *Modo* en el panel):
 
 - **Sobre mí (primera persona)** — **modo por defecto, no espejado**. La figura
-  se **ancla a tu cuerpo** y te sigue por la sala. Se calibra **automáticamente
-  por correspondencia de 3 puntos**: se asume la **cabeza en la posición del
-  visor** y se emparejan las **muñecas del visor** (hand-tracking) con las
-  muñecas detectadas por el pose estimation. Con esos 3 puntos se resuelve una
-  **transformación de similitud** (escala + rotación + traslación) que fija la
-  **altura y la posición** del esqueleto. La calibración se **recalcula
-  continuamente** mientras ambas manos estén visibles (suavizada para no saltar).
-  - Para que calibre: mostrá **ambas manos** al visor (hand-tracking activo). Si
-    no hay manos, cae a un anclaje simple a la cabeza hasta que aparezcan.
-  - Limitaciones: brazos/piernas pueden desajustarse por la profundidad
-    monocular y por el ruido de emparejar manos en movimiento; la escala se
-    acota y se suaviza. Ajuste fino opcional con *Escala*, *Altura*,
-    *Adelante/atrás*. No hace falta *Capturar escala (D)* ni marcar el celular.
+  se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
+  - El **eje vertical se fija al "arriba" real** (gravedad, del giroscopio del
+    visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
+  - La orientación es **solo yaw** (hacia dónde mirás); mirar hacia abajo o
+    inclinar la cabeza no tumba la figura.
+  - Se ancla la **cabeza del esqueleto a la posición del visor**, así el **core
+    queda siempre por debajo** cuando estás parado. Si el pose estimator te ve
+    **acostado**, la figura se muestra acostada (esa inclinación vive en la pose
+    articulada, no en el anclaje).
+  - La **escala se calibra una sola vez** con cabeza + ambas manos (no
+    continuamente, que era lo que metía ruido). Mostrá ambas manos al visor;
+    recalibrás cuando quieras con **D · Capturar escala**. La escala es
+    invariante a la rotación, por eso es estable aunque muevas los brazos.
+  - Ajuste fino opcional: *Escala*, *Altura*, *Adelante/atrás*. No hace falta
+    marcar el celular.
 - **Espejo (enfrente)**: la figura se coloca entre vos y el celular, como un
   reflejo. Usa la calibración manual (posición, celular, escala por altura).
 
