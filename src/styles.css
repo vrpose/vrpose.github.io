@@ -290,6 +290,18 @@ a {
   display: none !important;
 }
 
+.build-badge {
+  position: fixed;
+  right: 6px;
+  bottom: 4px;
+  z-index: 60;
+  font-size: 0.7rem;
+  color: var(--muted);
+  opacity: 0.6;
+  pointer-events: none;
+  user-select: all;
+}
+
 /* dom-overlay panel while in immersive AR: top-anchored, scrollable, on top. */
 .ar-overlay {
   position: fixed;

@@ -1,9 +1,16 @@
 import "./styles.css";
 import { onRouteChange, parseHash, type Route } from "./router";
 import { mountHome } from "./ui/home";
+import { BUILD } from "./config";
 
 const app = document.getElementById("app");
 if (!app) throw new Error("#app no encontrado");
+
+// Always-visible build stamp so it's obvious whether the page updated.
+const badge = document.createElement("div");
+badge.className = "build-badge mono";
+badge.textContent = `build ${BUILD}`;
+document.body.append(badge);
 
 let cleanup: (() => void) | null = null;
 let renderToken = 0;

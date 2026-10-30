@@ -6,6 +6,10 @@
 
 export const PROTOCOL_VERSION = 1;
 
+/** Build stamp (YYYYMMDDHHMM, UTC-3) injected at build time. "dev" when the
+ * define is absent (e.g. under vitest). See vite.config.ts / vite-env.d.ts. */
+export const BUILD: string = typeof __BUILD__ !== "undefined" ? __BUILD__ : "dev";
+
 /** Default MediaPipe assets. WASM is pinned to the installed package version. */
 export const MEDIAPIPE = {
   // Pin the WASM runtime to the same version as the npm package to avoid

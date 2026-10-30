@@ -1,7 +1,7 @@
-import { Quaternion, Vector3 } from "three";
+import { Euler, Quaternion, Vector3 } from "three";
 import { el, clear, statusPill, type StatusKind } from "../ui/dom";
 import type { Route } from "../router";
-import { resolveConfig } from "../config";
+import { resolveConfig, BUILD } from "../config";
 import { connectToCamera, type Link } from "../net/peer";
 import { QrScanner } from "./qrScanner";
 import { XrScene } from "./xrScene";
@@ -9,7 +9,7 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { measureModelHeight, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
+import { measureModelHeight, similarityFrom3Points, worldLandmarkToLocal } from "../math/transforms";
 import { LM, POSE_LANDMARK_COUNT } from "../pose/landmarks";
 import { parsePairingUrl } from "./pairing";
 import { hello, ping, reset, status, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
@@ -419,9 +419,12 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   // One-shot auto-calibration from the 3-point correspondence (head + both
   // wrists ↔ headset + both tracked hands). We keep:
   //   - SCALE: rotation-invariant, so stable even as the arms move;
-  //   - YAW: the horizontal part of the solved rotation, which aligns the
-  //     figure's facing (and its wrists) with the real tracked hands. Pitch/roll
-  //     are dropped so the figure stays gravity-upright.
+  //   - YAW: the pure horizontal (yaw) component of the solved rotation R,
+  //     extracted via an Euler YXZ decomposition (R = Ry·Rx·Rz → take Ry). This
+  //     aligns the figure's facing with the real body while staying gravity-
+  //     upright (pitch/roll dropped), independent of which local axis is "front".
+  // The phone always films from the front (≤~60° off-axis), so the pose depth
+  // sign is reliable and the hand correspondence is well-posed.
   // Called on demand (D / right pinch), not every frame.
   function calibrateScale(): boolean {
     if (!scene) return false;
@@ -438,12 +441,19 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     const t = similarityFrom3Points([localHead, localL, localR], [head, lw, rw]);
     if (!t) return false;
     auto.scale = Math.min(2.5, Math.max(0.3, t.scale));
-    // Yaw = horizontal projection of the solved body-forward (+Z) axis.
-    const fwd = new Vector3(0, 0, 1).applyQuaternion(t.quaternion);
-    auto.yaw = yawFacing(fwd);
+    const e = new Euler().setFromQuaternion(t.quaternion, "YXZ");
+    auto.yaw = new Quaternion().setFromAxisAngle(UP, e.y);
     auto.has = true;
     resetAnchor(); // re-center position on the next frame with the new yaw
     return true;
+  }
+
+  /** Which tracked hands the viewer currently sees (for on-device diagnostics). */
+  function handsSeen(): "both" | "left" | "right" | "none" {
+    if (!scene) return "none";
+    const l = !!scene.wristWorld("left");
+    const r = !!scene.wristWorld("right");
+    return l && r ? "both" : l ? "left" : r ? "right" : "none";
   }
 
   // --- overlay controls (work in AR via dom-overlay and on desktop) ---
@@ -467,6 +477,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       ]),
       el("div", { id: "ql-metrics", class: "metrics" }),
       el("p", { class: "muted", text: "Pellizco izquierdo: panel · Pellizco derecho: recalibrar · Ambas manos: salir." }),
+      el("p", { class: "muted mono", text: `build ${BUILD}` }),
     ]);
     controlPanel = panel;
     host.append(panel);
@@ -479,11 +490,13 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       const h = estimatedHeightM();
       const stats = buffer.stats;
       if (host2) {
+        const hands = handsSeen();
         host2.replaceChildren(
+          metric("Orientación", auto.has ? "calibrada" : "sin calibrar"),
+          metric("Manos (visor)", { both: "ambas", left: "solo izq", right: "solo der", none: "ninguna" }[hands]),
           metric("RTT", r == null ? "—" : `${r.toFixed(0)} ms`),
           metric("Altura estimada", h == null ? "—" : `${h.toFixed(2)} m`),
           metric("Antigüedad pose (local)", Number.isFinite(age) ? `${age.toFixed(0)} ms` : "—"),
-          metric("Aceptadas", String(stats.accepted)),
           metric("Rechazadas (viejas)", String(stats.rejected)),
         );
       }

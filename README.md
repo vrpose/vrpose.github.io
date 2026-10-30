@@ -78,6 +78,10 @@ de un túnel TLS, o un plugin de certificados. GitHub Pages ya sirve por HTTPS.
 - El workflow [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml)
   construye y publica `dist/` en cada push a `main` (Pages vía GitHub Actions).
   En el repo, activá **Settings → Pages → Source: GitHub Actions**.
+- **Número de build:** cada compilación estampa `__BUILD__` = `YYYYMMDDHHMM` en
+  **UTC-3** (ej. `202610300205`), calculado en `vite.config.ts`. Se muestra en
+  una esquina de todas las páginas (`build …`) y dentro del panel del visor, así
+  sabés de un vistazo si la página se actualizó (hacé *hard refresh* si no).
 - **Rutas de assets:** `vite.config.ts` usa `base: "./"` (rutas relativas), así
   que funciona tanto en la raíz (`https://vrpose.github.io/`) como en un
   subpath (`https://usuario.github.io/repo/`).
@@ -159,11 +163,15 @@ figura se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
   visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
 - La **orientación (yaw) sale del tracker de manos**, no de la mirada. Al
   calibrar resolvemos la correspondencia **cabeza + ambas muñecas ↔ visor +
-  ambas manos** (`similarityFrom3Points`) y nos quedamos con su componente
-  horizontal: así la figura **mira hacia donde mira tu cuerpo real** y las
-  muñecas del esqueleto **coinciden con tus manos detectadas**. Se resuelve una
-  vez y se **mantiene** (girar o inclinar la cabeza ya no rota el cuerpo: eso
-  era el "cuello ortopédico").
+  ambas manos** (`similarityFrom3Points`) y nos quedamos con el **yaw puro** de
+  esa rotación (descomposición Euler `YXZ`): así la figura **mira hacia donde
+  mira tu cuerpo real** y las muñecas del esqueleto **coinciden con tus manos
+  detectadas**. Se resuelve una vez y se **mantiene** (girar o inclinar la
+  cabeza ya no rota el cuerpo: eso era el "cuello ortopédico"). Se asume que el
+  celular **filma de frente** (a lo sumo ~60° de cada lado), por lo que el signo
+  de profundidad de la pose es confiable. Las métricas del panel muestran
+  *Orientación* (calibrada/sin calibrar) y *Manos (visor)* para diagnosticar: si
+  dice "ninguna", el *hand-tracking* no está activo y no habrá autocalibración.
 - El cuerpo se **ancla horizontalmente al centro de la cadera** (el *core*, que
   es estable), no a la cabeza, así mover o girar la cabeza **no hace bailar los
   pies**. La altura de la cabeza sí se alinea con el visor, de modo que el
