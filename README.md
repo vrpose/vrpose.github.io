@@ -152,37 +152,51 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
 3. **Mundo** — coordenadas de la sala en WebXR, donde realmente ubicamos la
    figura.
 
-**Dos modos de colocación** (botón *Modo* en el panel):
+**Colocación: "Sobre mí" (primera persona)** — único modo, no espejado. La
+figura se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
 
-- **Sobre mí (primera persona)** — **modo por defecto, no espejado**. La figura
-  se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
-  - El **eje vertical se fija al "arriba" real** (gravedad, del giroscopio del
-    visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
-  - La **orientación (yaw) se captura una sola vez** al calibrar y **se
-    mantiene**: girar o inclinar la cabeza **ya no rota el cuerpo** (eso era el
-    efecto "cuello ortopédico"). Mirá al frente al pulsar **D** para fijarla;
-    recalibrás cuando quieras.
-  - El cuerpo se **ancla horizontalmente al centro de la cadera** (el *core*,
-    que es estable), no a la cabeza, así mover o girar la cabeza **no hace
-    bailar los pies**. La altura de la cabeza sí se alinea con el visor, de modo
-    que el **core queda siempre por debajo** cuando estás parado. Si el pose
-    estimator te ve **acostado**, la figura se muestra acostada (esa inclinación
-    vive en la pose articulada, no en el anclaje).
-  - La posición del ancla está **suavizada (paso bajo, ~0,5 s)**: los
-    movimientos rápidos de cabeza se amortiguan, pero si caminás el cuerpo te
-    acompaña.
-  - La **escala se calibra una sola vez** con cabeza + ambas manos (no
-    continuamente, que era lo que metía ruido). Mostrá ambas manos al visor;
-    recalibrás cuando quieras con **D**. La escala es invariante a la rotación,
-    por eso es estable aunque muevas los brazos.
-  - Ajuste fino opcional: *Escala*, *Altura*, *Adelante/atrás*. No hace falta
-    marcar el celular.
-- **Espejo (enfrente)**: la figura se coloca entre vos y el celular, como un
-  reflejo. Usa la calibración manual (posición, celular, escala por altura).
+- El **eje vertical se fija al "arriba" real** (gravedad, del giroscopio del
+  visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
+- La **orientación (yaw) sale del tracker de manos**, no de la mirada. Al
+  calibrar resolvemos la correspondencia **cabeza + ambas muñecas ↔ visor +
+  ambas manos** (`similarityFrom3Points`) y nos quedamos con su componente
+  horizontal: así la figura **mira hacia donde mira tu cuerpo real** y las
+  muñecas del esqueleto **coinciden con tus manos detectadas**. Se resuelve una
+  vez y se **mantiene** (girar o inclinar la cabeza ya no rota el cuerpo: eso
+  era el "cuello ortopédico").
+- El cuerpo se **ancla horizontalmente al centro de la cadera** (el *core*, que
+  es estable), no a la cabeza, así mover o girar la cabeza **no hace bailar los
+  pies**. La altura de la cabeza sí se alinea con el visor, de modo que el
+  **core queda siempre por debajo** cuando estás parado. Si el pose estimator te
+  ve **acostado**, la figura se muestra acostada (esa inclinación vive en la
+  pose articulada, no en el anclaje).
+- La posición del ancla está **suavizada (paso bajo, ~0,5 s)**: los movimientos
+  rápidos de cabeza se amortiguan, pero si caminás el cuerpo te acompaña.
+- La **escala se calibra en el mismo paso** (es invariante a la rotación, por
+  eso es estable aunque muevas los brazos). Mostrá ambas manos al visor y tocá
+  **D**; recalibrás cuando quieras.
+- Ajuste fino opcional: *Escala*, *Altura*, *Adelante/atrás*, *Rotación fina*.
+
+> Se quitó el antiguo **modo espejo** (figura enfrente, marcando el celular con
+> el mando): la orientación por manos lo hace innecesario y evita errores de
+> frente/espalda. La **detección** no cambia — ocurre siempre en el celular,
+> independiente de cómo coloque la figura el visor.
+
+Controles del panel (también dentro de AR vía *dom-overlay*):
+
+- **D · Calibrar (parado, ambas manos)**: con ambas manos visibles para el
+  visor, resuelve **escala + orientación** desde las 3 correspondencias. Es
+  one-shot: no se recalibra solo en cada frame (eso metía ruido).
+- **E · Corregir izq/der**: si la figura queda de espaldas o con las manos
+  cruzadas, alterna la **reflexión** (negando el eje X local, no intercambiando
+  etiquetas) y vuelve a resolver. Verificación guiada: *"levantá la mano
+  derecha"*.
+- Sliders de **Adelante/atrás**, **Altura**, **Escala** y **Rotación fina** para
+  ajuste manual sobre la autocalibración.
 
 > **Gestos en AR** (requieren *hand-tracking* activo en el visor):
-> - **Pellizco mano izquierda**: muestra/oculta el panel de calibración.
-> - **Pellizco mano derecha / gatillo**: marca el celular cuando está armado (B).
+> - **Pellizco mano izquierda**: muestra/oculta el panel.
+> - **Pellizco mano derecha / gatillo**: recalibra (equivale a **D**).
 > - **Pellizco con ambas manos casi a la vez**: sale de realidad mixta. Funciona
 >   aun si el panel (dom-overlay) no se muestra en tu visor.
 >
@@ -194,27 +208,6 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
 > **Panel en AR:** el panel usa `dom-overlay`. Si tu visor no lo soporta, usá los
 > gestos de arriba (y el botón del sistema del visor para salir como último
 > recurso).
-
-Pasos del modo espejo (controles en el panel, también dentro de AR vía
-*dom-overlay*):
-
-- **A · Posición del usuario**: guarda tu posición y orientación horizontal al
-  pulsar *Calibrar*.
-- **B · Celular**: marcá su posición apuntando con el **mando al piso** y
-  apretando el gatillo; o usá la alternativa **manual** (distancia + dirección).
-  No se infiere la posición física del celular desde el QR.
-- **Plano del espejo**: la figura se coloca entre vos y el celular (a mitad de
-  distancia por defecto), **orientada hacia vos** y con orientación **fija** tras
-  calibrar (no sigue cada giro de cabeza). Ajustás distancia, lateral, altura,
-  escala y rotación.
-- **D · Escala y suelo**: parado unos segundos con ambos pies visibles, pulsá
-  *Capturar escala* e ingresá tu **altura real**. Se fija una **referencia de
-  suelo calibrada**; **no** se re-nivela el esqueleto en cada frame (eso
-  eliminaría saltos y elevaciones de rodilla).
-- **E · Espejo**: la reflexión se aplica en el **sistema del espejo** (negando
-  el eje X local), no intercambiando etiquetas izquierda/derecha. Verificación
-  guiada: *"levantá la mano derecha"*; si quedó doblemente espejado, usá
-  *Corregir espejo*.
 
 ## Rendimiento
 

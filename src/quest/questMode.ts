@@ -9,7 +9,7 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { buildMirrorFrame, measureModelHeight, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
+import { measureModelHeight, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
 import { LM, POSE_LANDMARK_COUNT } from "../pose/landmarks";
 import { parsePairingUrl } from "./pairing";
 import { hello, ping, reset, status, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
@@ -32,34 +32,31 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let pingTimer = 0;
   let disposed = false;
 
+  // Only one placement remains: "Sobre mí" (first-person overlay). The old
+  // mirror placement was removed — orientation now comes from the hand tracker
+  // (see calibrateScale), which makes a separate mirror mode unnecessary and
+  // removed a source of back-to-front errors.
   const placement = {
-    mode: "overlay" as "mirror" | "overlay", // default: sobre mí
-    fraction: 0.5,
-    lateral: 0,
     height: 0,
     scale: 1,
-    yaw: 0,
-    forward: 0, // overlay: shift along the body's facing direction
+    yaw: 0, // manual fine-tune on top of the auto yaw
+    forward: 0, // shift along the body's facing direction
   };
-  let userPos: Vector3 | null = null;
-  let phonePos: Vector3 | null = null;
-  let markPhoneArmed = false;
   let controlPanel: HTMLElement | null = null;
   let arOverlayRoot: HTMLElement | null = null;
 
-  // Overlay scale, calibrated once from 3 point correspondences (head↔headset
-  // and both wrists↔tracked hands). Only the rotation-invariant SCALE is kept;
-  // orientation is derived from the headset (gravity up + yaw) each frame.
-  const auto = { scale: 1, has: false };
+  // Overlay auto-calibration, solved ONCE from 3 point correspondences
+  // (head↔headset and both wrists↔tracked hands). We keep the rotation-invariant
+  // SCALE and the YAW: the yaw is the horizontal component of the solved rotation
+  // (gravity-locked, so the figure can't tip), which is what makes the figure
+  // FACE correctly and the wrists coincide with the tracked hands — the headset
+  // gaze is NOT used for orientation. Held after solving to avoid jitter.
+  const auto = { scale: 1, yaw: new Quaternion(), has: false };
 
-  // World anchor for the overlay figure, captured ONCE (at placement / D) and
-  // then held. The body yaw is frozen so turning or tilting your head no longer
-  // rotates the figure (this was the "neck brace" effect), and the position is
-  // low-pass filtered so quick head motion is damped while slow body translation
-  // (walking) still tracks. Recalibrate to re-aim/re-center.
-  const anchor = { pos: new Vector3(), quat: new Quaternion(), has: false, posInit: false, lastT: 0 };
+  // Position anchor for the overlay figure. Low-pass filtered so quick head
+  // motion is damped while slow body translation (walking) still tracks.
+  const anchor = { pos: new Vector3(), posInit: false, lastT: 0 };
   function resetAnchor(): void {
-    anchor.has = false;
     anchor.posInit = false;
   }
 
@@ -272,9 +269,9 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
     // WebXR input: a hand pinch (or a controller trigger) fires 'select'. We
     // route by handedness: LEFT pinch toggles the calibration panel; RIGHT
-    // pinch / trigger marks the phone when armed. Handedness comes from the
-    // input source captured on 'connected'. These events are not in three's
-    // typed Object3DEventMap, hence the casts.
+    // pinch / trigger recalibrates from the hands; BOTH together exit AR.
+    // Handedness comes from the input source captured on 'connected'. These
+    // events are not in three's typed Object3DEventMap, hence the casts.
     for (const c of scene.controllers) {
       const ev = c as unknown as {
         addEventListener: (t: string, cb: (e: { data?: { handedness?: string } }) => void) => void;
@@ -304,14 +301,8 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
           togglePanel();
           return;
         }
-        if (!markPhoneArmed || !scene) return;
-        const hit = scene.controllerFloorHit(0) ?? scene.controllerFloorHit(1);
-        if (hit) {
-          phonePos = hit.clone();
-          markPhoneArmed = false;
-          recomputeFrame();
-          toast("Celular marcado.");
-        }
+        // Right pinch / trigger: recalibrate scale + orientation from the hands.
+        if (hand === "right") captureReference();
       });
     }
 
@@ -348,39 +339,34 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     }
     skeleton.setGlobalOpacity(1);
     const mapped = mapper.map(buffered.pose, cal, tSec);
-    // Overlay placement needs the mapped pose (to anchor to the body), so it
-    // runs after mapping and before the skeleton update.
-    if (placement.mode === "overlay") placeOverlay(mapped.positions, tSec);
+    // Placement needs the mapped pose (to anchor to the body), so it runs after
+    // mapping and before the skeleton update.
+    placeOverlay(mapped.positions, tSec);
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
   // Overlay placement (stable, never upside-down, no "neck brace"):
-  //  - Vertical axis is locked to world up (gravity, from the headset). We never
-  //    apply a solved rotation, so the figure can't flip (no "feet on ceiling").
-  //  - Yaw is captured ONCE (at placement / D) and HELD. Turning or tilting your
-  //    head no longer rotates the body — that rigid coupling was the neck brace.
+  //  - Vertical axis is locked to world up (gravity, from the headset), so the
+  //    figure can never flip (no "feet on ceiling").
+  //  - Yaw comes from the HAND TRACKER, not the gaze: calibrateScale solves the
+  //    head+two-wrists correspondence and we keep its horizontal (yaw) component,
+  //    so the figure faces the way your real body does and the wrists line up
+  //    with the tracked hands. It is solved ONCE and HELD (turning/tilting your
+  //    head no longer rotates the body).
   //  - Horizontal position is anchored to the stable HIP CENTRE (the body core),
   //    not the head, so head bobbing/looking around doesn't swing the feet. The
   //    head height is still matched to the headset so the core sits BELOW it.
   //  - The anchor position is low-pass filtered: quick head motion is damped,
   //    slow body translation (walking) still tracks over ~0.5 s.
-  //  - Scale is calibrated ONCE from head+hands (see calibrateScale), not per
-  //    frame. Lying down etc. lives in the articulated pose, not in placement.
   const UP = new Vector3(0, 1, 0);
   function placeOverlay(positions: (Vector3 | null)[], tSec: number): void {
     if (!scene || !skeleton) return;
-    if (!auto.has) calibrateScale(); // one-shot until it succeeds
+    if (!auto.has) calibrateScale(); // one-shot until both hands are seen
     const s = auto.scale * placement.scale;
     const vp = scene.readViewerPose();
 
-    // Capture (and freeze) the body yaw the first time we place it.
-    if (!anchor.has) {
-      anchor.quat = yawFacing(vp.forwardXZ);
-      anchor.has = true;
-      anchor.posInit = false;
-      anchor.lastT = tSec;
-    }
-    const q = anchor.quat.clone();
+    // Orientation: the auto yaw from the hands, plus any manual fine-tune.
+    const q = auto.yaw.clone();
     if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(UP, placement.yaw));
     skeleton.root.quaternion.copy(q);
     skeleton.root.scale.setScalar(s);
@@ -430,9 +416,13 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     return span * auto.scale * placement.scale;
   }
 
-  // One-shot scale from the 3-point correspondence (head + both wrists). Only
-  // the SCALE is used (it is rotation-invariant and stable); the noisy solved
-  // rotation/translation are discarded. Call on demand, not every frame.
+  // One-shot auto-calibration from the 3-point correspondence (head + both
+  // wrists ↔ headset + both tracked hands). We keep:
+  //   - SCALE: rotation-invariant, so stable even as the arms move;
+  //   - YAW: the horizontal part of the solved rotation, which aligns the
+  //     figure's facing (and its wrists) with the real tracked hands. Pitch/roll
+  //     are dropped so the figure stays gravity-upright.
+  // Called on demand (D / right pinch), not every frame.
   function calibrateScale(): boolean {
     if (!scene) return false;
     const buffered = buffer.peek();
@@ -448,28 +438,12 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     const t = similarityFrom3Points([localHead, localL, localR], [head, lw, rw]);
     if (!t) return false;
     auto.scale = Math.min(2.5, Math.max(0.3, t.scale));
+    // Yaw = horizontal projection of the solved body-forward (+Z) axis.
+    const fwd = new Vector3(0, 0, 1).applyQuaternion(t.quaternion);
+    auto.yaw = yawFacing(fwd);
     auto.has = true;
+    resetAnchor(); // re-center position on the next frame with the new yaw
     return true;
-  }
-
-  function recomputeFrame(): void {
-    if (!scene || !skeleton) return;
-    if (placement.mode === "overlay") {
-      return; // overlay is placed per-frame in placeOverlay()
-    }
-    if (!userPos || !phonePos) return;
-    const frame = buildMirrorFrame({
-      userPos,
-      phonePos,
-      fraction: placement.fraction,
-      floorY: scene.floorY,
-      lateralOffset: placement.lateral,
-      extraYaw: placement.yaw,
-    });
-    skeleton.root.position.copy(frame.position);
-    skeleton.root.position.y += placement.height;
-    skeleton.root.quaternion.copy(frame.quaternion);
-    skeleton.root.scale.setScalar(placement.scale);
   }
 
   // --- overlay controls (work in AR via dom-overlay and on desktop) ---
@@ -480,85 +454,20 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       return el("label", {}, [label, input]);
     };
 
-    const modeBtn = el("button", {}, []);
-    const abRow = el("div", { class: "row" }, [
-      el("button", { onclick: () => {
-          if (!scene) return;
-          const vp = scene.readViewerPose();
-          userPos = vp.position.clone();
-          // Face the phone roughly where the user looks until the phone is marked.
-          if (!phonePos) phonePos = vp.position.clone().add(vp.forwardXZ.clone().multiplyScalar(2));
-          recomputeFrame();
-          toast("Posición del usuario calibrada.");
-        } }, ["A · Calibrar mi posición"]),
-      el("button", { class: "secondary", onclick: () => { markPhoneArmed = true; toast("Apuntá al piso donde está el celular y apretá el gatillo."); } }, ["B · Marcar celular (gatillo)"]),
-    ]);
-    // Controls that only make sense for the mirror placement.
-    const mirrorOnly = el("div", {}, [
-      el("details", {}, [
-        el("summary", { text: "Celular manual (distancia y dirección)" }),
-        el("div", { class: "row" }, [
-          el("label", {}, ["Distancia (m)", numInput(2, 0.3, 8, 0.1, (d) => setPhoneManual(d, undefined))]),
-          el("label", {}, ["Dirección (°)", numInput(0, -90, 90, 5, (deg) => setPhoneManual(undefined, deg))]),
-        ]),
-      ]),
-      slider("Distancia al espejo (fracción)", 0.1, 0.9, 0.01, placement.fraction, (v) => { placement.fraction = v; recomputeFrame(); }),
-      slider("Lateral (m)", -1.5, 1.5, 0.02, placement.lateral, (v) => { placement.lateral = v; recomputeFrame(); }),
-    ]);
-
-    const applyModeLabel = () => {
-      modeBtn.textContent = placement.mode === "mirror" ? "Modo: Espejo (enfrente)" : "Modo: Sobre mí (primera persona)";
-      // A/B (phone position) and the mirror-only sliders are irrelevant in overlay.
-      abRow.classList.toggle("hidden", placement.mode === "overlay");
-      mirrorOnly.classList.toggle("hidden", placement.mode === "overlay");
-    };
-    const setMode = (m: "mirror" | "overlay") => {
-      placement.mode = m;
-      if (m === "overlay") {
-        // Canonical body-space output; the root transform (auto-calibration)
-        // carries scale/position/orientation.
-        cal.scale = 1;
-        cal.footBaselineLocal = 0;
-        cal.lateralEnabled = false;
-        cal.mirror = false;
-        auto.has = false; // re-solve from the 3 points
-        resetAnchor(); // re-aim yaw + re-center on next placement
-      } else {
-        cal.mirror = true; // mirror reflection; scale/floor come from D capture
-      }
-      mapper.reset();
-      skeleton?.resetRetained();
-      applyModeLabel();
-      recomputeFrame();
-      toast(
-        m === "overlay"
-          ? "Sobre mí: se calibra solo con cabeza + manos (mostrá ambas manos al visor)."
-          : "Modo espejo.",
-      );
-    };
-    modeBtn.addEventListener("click", () => setMode(placement.mode === "mirror" ? "overlay" : "mirror"));
-
     const panel = el("div", { class: "card" }, [
       el("button", { onclick: () => void exitStage() }, ["⏹ Salir de realidad mixta"]),
-      modeBtn,
-      abRow,
-      mirrorOnly,
-      slider("Adelante/atrás (m)", -1, 1, 0.02, placement.forward, (v) => { placement.forward = v; recomputeFrame(); }),
-      slider("Altura (m)", -1, 1, 0.01, placement.height, (v) => { placement.height = v; recomputeFrame(); }),
-      slider("Escala", 0.5, 1.8, 0.01, placement.scale, (v) => { placement.scale = v; recomputeFrame(); }),
-      slider("Rotación (rad)", -Math.PI, Math.PI, 0.02, placement.yaw, (v) => { placement.yaw = v; recomputeFrame(); }),
+      el("p", { class: "muted", text: "Sobre mí: mostrá ambas manos al visor y tocá D para calibrar escala y orientación." }),
+      slider("Adelante/atrás (m)", -1, 1, 0.02, placement.forward, (v) => { placement.forward = v; }),
+      slider("Altura (m)", -1, 1, 0.01, placement.height, (v) => { placement.height = v; }),
+      slider("Escala", 0.5, 1.8, 0.01, placement.scale, (v) => { placement.scale = v; }),
+      slider("Rotación fina (rad)", -Math.PI, Math.PI, 0.02, placement.yaw, (v) => { placement.yaw = v; }),
       el("div", { class: "row" }, [
-        el("button", { class: "secondary", onclick: () => void captureReference() }, ["D · Calibrar (parado, mirá al frente)"]),
-        el("label", {}, ["Altura real (m)", numInput(1.7, 1.2, 2.2, 0.01, (h) => (userHeightM = h))]),
-      ]),
-      el("div", { class: "row" }, [
-        el("button", { class: "secondary", onclick: () => { cal.mirror = !cal.mirror; mapper.reset(); toast(`Reflexión: ${cal.mirror ? "espejo" : "directo"}. Levantá la mano derecha para verificar.`); } }, ["E · Corregir espejo (levantá mano derecha)"]),
-        el("button", { class: "secondary", onclick: () => { cal.lateralEnabled = !cal.lateralEnabled; toast(`Desplazamiento lateral: ${cal.lateralEnabled ? "ON (aprox.)" : "OFF"}`); } }, ["Lateral aprox."]),
+        el("button", { class: "secondary", onclick: () => void captureReference() }, ["D · Calibrar (parado, ambas manos)"]),
+        el("button", { class: "secondary", onclick: () => flipReflection() }, ["E · Corregir izq/der (levantá mano derecha)"]),
       ]),
       el("div", { id: "ql-metrics", class: "metrics" }),
-      el("p", { class: "muted", text: "Pellizco con la mano izquierda: mostrar/ocultar este panel." }),
+      el("p", { class: "muted", text: "Pellizco izquierdo: panel · Pellizco derecho: recalibrar · Ambas manos: salir." }),
     ]);
-    applyModeLabel();
     controlPanel = panel;
     host.append(panel);
 
@@ -586,48 +495,27 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     overlayTimers.push(mTimer);
   }
 
-  let userHeightM = 1.7;
   const overlayTimers: number[] = [];
 
-  function setPhoneManual(distance?: number, directionDeg?: number): void {
-    if (!scene || !userPos) {
-      toast("Primero calibrá tu posición (A).");
-      return;
-    }
-    const vp = scene.readViewerPose();
-    const d = distance ?? (phonePos ? phonePos.distanceTo(userPos) : 2);
-    const deg = directionDeg ?? 0;
-    const rad = (deg * Math.PI) / 180;
-    // Rotate the viewer forward by `deg` around up, project to floor.
-    const fwd = vp.forwardXZ.clone();
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    const dir = new Vector3(fwd.x * cos - fwd.z * sin, 0, fwd.x * sin + fwd.z * cos).normalize();
-    phonePos = userPos.clone().add(dir.multiplyScalar(d));
-    phonePos.y = scene.floorY;
-    recomputeFrame();
+  // Full recalibrate: re-solve scale AND yaw from head + both hands.
+  function captureReference(): void {
+    auto.has = false;
+    const ok = calibrateScale();
+    toast(ok ? `Calibrado · escala ×${auto.scale.toFixed(2)}.` : "Mostrá ambas manos al visor para calibrar.");
   }
 
-  function captureReference(): void {
-    if (placement.mode === "overlay") {
-      // Full recalibrate: re-solve scale from head + both hands AND re-aim/re-center.
-      auto.has = false;
-      resetAnchor();
-      const ok = calibrateScale();
-      toast(ok ? `Escala ×${auto.scale.toFixed(2)}. Mirá al frente: fija orientación.` : "Mostrá ambas manos al visor para calibrar.");
-      return;
-    }
-    const buffered = buffer.peek();
-    if (!buffered) {
-      toast("No hay pose recibida todavía.");
-      return;
-    }
-    const prevLateral = cal.lateralEnabled;
-    cal = PoseMapper.buildCalibration(buffered.pose, userHeightM, cal.mirror);
-    cal.lateralEnabled = prevLateral; // preserve the lateral toggle across recalibration
+  // Flip the left/right correspondence (reflection). If the figure faces the
+  // wrong way or mirrors your hands, toggling this and re-solving fixes it.
+  function flipReflection(): void {
+    cal.mirror = !cal.mirror;
     mapper.reset();
     skeleton?.resetRetained();
-    toast(`Escala calibrada (×${cal.scale.toFixed(2)}).`);
+    auto.has = false; // re-solve yaw/scale under the new correspondence
+    const ok = calibrateScale();
+    toast(
+      `Izq/der: ${cal.mirror ? "espejo" : "directo"}.` +
+        (ok ? " Recalibrado." : " Mostrá ambas manos para recalibrar."),
+    );
   }
 
   async function exitStage(): Promise<void> {
@@ -685,13 +573,4 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
 function metric(label: string, value: string): HTMLElement {
   return el("div", { class: "metric" }, [el("b", { text: value }), label]);
-}
-
-function numInput(val: number, min: number, max: number, step: number, on: (v: number) => void): HTMLInputElement {
-  const input = el("input", { type: "number", value: val, min, max, step }) as HTMLInputElement;
-  input.addEventListener("input", () => {
-    const n = Number(input.value);
-    if (Number.isFinite(n)) on(n);
-  });
-  return input;
 }
