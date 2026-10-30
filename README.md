@@ -168,9 +168,20 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
 - **Espejo (enfrente)**: la figura se coloca entre vos y el celular, como un
   reflejo. Usa la calibración manual (posición, celular, escala por altura).
 
-> **Gesto en AR:** un **pellizco con la mano izquierda** muestra/oculta el panel
-> de calibración (requiere *hand-tracking* activo en el visor). El pellizco/gatillo
-> de la mano derecha marca el celular cuando está armado (paso B).
+> **Gestos en AR** (requieren *hand-tracking* activo en el visor):
+> - **Pellizco mano izquierda**: muestra/oculta el panel de calibración.
+> - **Pellizco mano derecha / gatillo**: marca el celular cuando está armado (B).
+> - **Pellizco con ambas manos casi a la vez**: sale de realidad mixta. Funciona
+>   aun si el panel (dom-overlay) no se muestra en tu visor.
+>
+> **Depuración de manos:** las manos detectadas por el visor se dibujan como
+> **líneas de dedos** (azul = izquierda, naranja = derecha). Si no ves líneas, el
+> *hand-tracking* no está activo → no habrá autocalibración ni gestos; activalo
+> en los ajustes del visor.
+>
+> **Panel en AR:** el panel usa `dom-overlay`. Si tu visor no lo soporta, usá los
+> gestos de arriba (y el botón del sistema del visor para salir como último
+> recurso).
 
 Pasos del modo espejo (controles en el panel, también dentro de AR vía
 *dom-overlay*):

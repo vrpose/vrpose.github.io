@@ -45,6 +45,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let phonePos: Vector3 | null = null;
   let markPhoneArmed = false;
   let controlPanel: HTMLElement | null = null;
+  let arOverlayRoot: HTMLElement | null = null;
 
   // Auto-calibration (overlay): similarity transform solved from 3 point
   // correspondences — head↔headset and both wrists↔tracked hands — smoothed.
@@ -274,7 +275,20 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
         ev.userData.handedness = undefined;
       });
       ev.addEventListener("select", () => {
-        if (ev.userData.handedness === "left") {
+        const hand = ev.userData.handedness;
+        // Exit gesture: pinch BOTH hands within a short window (works even if
+        // the dom-overlay panel isn't shown).
+        const now = performance.now();
+        if (hand === "left" || hand === "right") {
+          selectTimes[hand] = now;
+          const other = hand === "left" ? "right" : "left";
+          if (now - selectTimes[other] < 450) {
+            toast("Saliendo de realidad mixta…");
+            void exitStage();
+            return;
+          }
+        }
+        if (hand === "left") {
           togglePanel();
           return;
         }
@@ -290,13 +304,26 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     }
 
     if (ar) {
+      // Make the overlay the dom-overlay root at the top level of the document
+      // (nesting/stacking contexts can stop it from compositing in AR).
+      arOverlayRoot = overlay;
+      overlay.classList.add("ar-overlay");
+      document.body.append(overlay);
       try {
         await scene.enterAR({ domOverlayRoot: overlay });
+        const session = scene.renderer.xr.getSession() as unknown as { domOverlayState?: { type?: string } } | null;
+        if (!session?.domOverlayState) {
+          // DOM can't be shown over AR on this device: tell the user how to act
+          // with gestures instead (this toast lives inside the overlay root).
+          toast("Sin dom-overlay: pellizco izquierdo = panel, ambas manos = salir.");
+        }
       } catch (e) {
         toast(`No se pudo entrar en AR: ${(e as Error).message}`);
       }
     }
   }
+
+  const selectTimes: Record<"left" | "right", number> = { left: -1e9, right: -1e9 };
 
   function renderFrame(tSec: number): void {
     if (!scene || !skeleton) return;
@@ -552,6 +579,9 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     scene = null;
     skeleton = null;
     controlPanel = null;
+    // Remove the overlay we may have hoisted to <body> for dom-overlay.
+    arOverlayRoot?.remove();
+    arOverlayRoot = null;
     renderReception();
     const host = page.querySelector("#recv-status");
     if (host) host.replaceChildren(statusPill(link?.state === "open" ? "Emparejado" : "Desconectado", link?.state === "open" ? "ok" : "err"));
@@ -566,7 +596,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     t.style.left = "50%";
     t.style.transform = "translateX(-50%)";
     t.style.zIndex = "50";
-    document.body.append(t);
+    t.style.pointerEvents = "none";
+    // In AR only the dom-overlay root subtree is composited, so toasts must live
+    // inside it to be visible.
+    (arOverlayRoot ?? document.body).append(t);
     setTimeout(() => t.remove(), 2600);
   }
 
@@ -586,6 +619,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     peerHandle?.destroy();
     scene?.dispose();
     skeleton?.dispose();
+    arOverlayRoot?.remove();
     page.remove();
   };
 }

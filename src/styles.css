@@ -289,3 +289,22 @@ a {
 .hidden {
   display: none !important;
 }
+
+/* dom-overlay panel while in immersive AR: top-anchored, scrollable, on top. */
+.ar-overlay {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  right: auto;
+  bottom: auto;
+  transform: none;
+  width: min(380px, 92vw);
+  max-height: 92vh;
+  overflow-y: auto;
+  z-index: 1000;
+  pointer-events: auto;
+}
+.ar-overlay .card {
+  background: rgba(21, 26, 36, 0.92);
+  backdrop-filter: blur(4px);
+}

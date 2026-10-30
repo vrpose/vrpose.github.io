@@ -15,10 +15,23 @@ import {
   WebGLRenderer,
   GridHelper,
   Line,
+  LineSegments,
   BufferGeometry,
   LineBasicMaterial,
   Float32BufferAttribute,
+  type BufferAttribute,
+  type Matrix4,
 } from "three";
+
+// WebXR hand joint chains (per finger), used to draw debug lines.
+const FINGER_CHAINS: string[][] = [
+  ["wrist", "thumb-metacarpal", "thumb-phalanx-proximal", "thumb-phalanx-distal", "thumb-tip"],
+  ["wrist", "index-finger-metacarpal", "index-finger-phalanx-proximal", "index-finger-phalanx-intermediate", "index-finger-phalanx-distal", "index-finger-tip"],
+  ["wrist", "middle-finger-metacarpal", "middle-finger-phalanx-proximal", "middle-finger-phalanx-intermediate", "middle-finger-phalanx-distal", "middle-finger-tip"],
+  ["wrist", "ring-finger-metacarpal", "ring-finger-phalanx-proximal", "ring-finger-phalanx-intermediate", "ring-finger-phalanx-distal", "ring-finger-tip"],
+  ["wrist", "pinky-finger-metacarpal", "pinky-finger-phalanx-proximal", "pinky-finger-phalanx-intermediate", "pinky-finger-phalanx-distal", "pinky-finger-tip"],
+];
+const HAND_EDGES = FINGER_CHAINS.reduce((n, c) => n + (c.length - 1), 0); // 24
 
 export interface ViewerPose {
   position: Vector3;
@@ -34,6 +47,7 @@ export class XrScene {
   readonly camera = new PerspectiveCamera(60, 1, 0.01, 50);
   readonly controllers: Group[] = [];
   readonly hands: Group[] = [];
+  private handLines: { hand: Group; seg: LineSegments; pos: Float32Array }[] = [];
   private frameCbs: FrameCallback[] = [];
   private floorYValue = 0;
   private inXR = false;
@@ -73,6 +87,20 @@ export class XrScene {
       bindHandedness(h);
       this.scene.add(h);
       this.hands.push(h);
+
+      // Debug finger lines (world space, drawn on top for visibility).
+      const pos = new Float32Array(HAND_EDGES * 2 * 3);
+      const geo = new BufferGeometry();
+      geo.setAttribute("position", new Float32BufferAttribute(pos, 3));
+      const seg = new LineSegments(
+        geo,
+        new LineBasicMaterial({ color: i === 0 ? 0x4f9dff : 0xff8a5c, depthTest: false, transparent: true }),
+      );
+      seg.frustumCulled = false;
+      seg.renderOrder = 999;
+      seg.visible = false;
+      this.scene.add(seg);
+      this.handLines.push({ hand: h, seg, pos });
     }
 
     this.setupDesktopOrbit();
@@ -187,9 +215,43 @@ export class XrScene {
   // --- internals ---
   private loop = (time: number) => {
     if (!this.inXR) this.applyDesktopCamera();
+    this.updateHandLines();
     for (const cb of this.frameCbs) cb(time / 1000);
     this.renderer.render(this.scene, this.camera);
   };
+
+  private updateHandLines(): void {
+    const v = new Vector3();
+    for (const hl of this.handLines) {
+      const joints = (hl.hand as unknown as { joints?: Record<string, { matrixWorld: Matrix4 }> }).joints;
+      if (!joints || !hl.hand.userData.handedness) {
+        hl.seg.visible = false;
+        continue;
+      }
+      let k = 0;
+      let any = false;
+      for (const chain of FINGER_CHAINS) {
+        for (let j = 0; j < chain.length - 1; j++) {
+          const a = joints[chain[j]];
+          const b = joints[chain[j + 1]];
+          if (a && b) {
+            v.setFromMatrixPosition(a.matrixWorld);
+            hl.pos[k++] = v.x; hl.pos[k++] = v.y; hl.pos[k++] = v.z;
+            v.setFromMatrixPosition(b.matrixWorld);
+            hl.pos[k++] = v.x; hl.pos[k++] = v.y; hl.pos[k++] = v.z;
+            any = true;
+          } else {
+            // collapse missing edge to a point so no stray line is drawn
+            for (let n = 0; n < 6; n++) hl.pos[k++] = 0;
+          }
+        }
+      }
+      hl.seg.visible = any;
+      const attr = hl.seg.geometry.getAttribute("position") as BufferAttribute;
+      (attr.array as Float32Array).set(hl.pos);
+      attr.needsUpdate = true;
+    }
+  }
 
   private onResize = () => {
     const w = this.container.clientWidth || window.innerWidth;
