@@ -268,10 +268,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     scene.onFrame((tSec) => renderFrame(tSec));
 
     // WebXR input: a hand pinch (or a controller trigger) fires 'select'. We
-    // route by handedness: LEFT pinch toggles the calibration panel; RIGHT
-    // pinch / trigger recalibrates from the hands; BOTH together exit AR.
-    // Handedness comes from the input source captured on 'connected'. These
-    // events are not in three's typed Object3DEventMap, hence the casts.
+    // route by handedness: LEFT pinch flips the figure 180° (and toggles the DOM
+    // panel where supported); RIGHT pinch / trigger recalibrates from the hands;
+    // BOTH together exit AR. Handedness comes from the input source captured on
+    // 'connected'. These events are not in three's typed Object3DEventMap.
     for (const c of scene.controllers) {
       const ev = c as unknown as {
         addEventListener: (t: string, cb: (e: { data?: { handedness?: string } }) => void) => void;
@@ -298,6 +298,9 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
           }
         }
         if (hand === "left") {
+          // Flip the figure 180° (fixes "facing backwards") AND toggle the DOM
+          // panel for devices where dom-overlay does composite.
+          flipFacing();
           togglePanel();
           return;
         }
@@ -316,9 +319,15 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
         await scene.enterAR({ domOverlayRoot: overlay });
         const session = scene.renderer.xr.getSession() as unknown as { domOverlayState?: { type?: string } } | null;
         if (!session?.domOverlayState) {
-          // DOM can't be shown over AR on this device: tell the user how to act
-          // with gestures instead (this toast lives inside the overlay root).
-          toast("Sin dom-overlay: pellizco izquierdo = panel, ambas manos = salir.");
+          // DOM can't be composited over AR on this device. The 3D HUD (in-scene)
+          // shows status and the gesture legend instead, so this is non-fatal.
+          scene?.setHud([
+            `build ${BUILD}`,
+            "Sin panel DOM en AR: usá gestos.",
+            "· Pellizco izq: girar 180°",
+            "· Pellizco der: recalibrar",
+            "· Ambas manos: salir",
+          ]);
         }
       } catch (e) {
         toast(`No se pudo entrar en AR: ${(e as Error).message}`);
@@ -473,10 +482,11 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       slider("Rotación fina (rad)", -Math.PI, Math.PI, 0.02, placement.yaw, (v) => { placement.yaw = v; }),
       el("div", { class: "row" }, [
         el("button", { class: "secondary", onclick: () => void captureReference() }, ["D · Calibrar (parado, ambas manos)"]),
-        el("button", { class: "secondary", onclick: () => flipReflection() }, ["E · Corregir izq/der (levantá mano derecha)"]),
+        el("button", { class: "secondary", onclick: () => flipFacing() }, ["↻ Girar 180°"]),
+        el("button", { class: "secondary", onclick: () => flipReflection() }, ["E · Corregir izq/der"]),
       ]),
       el("div", { id: "ql-metrics", class: "metrics" }),
-      el("p", { class: "muted", text: "Pellizco izquierdo: panel · Pellizco derecho: recalibrar · Ambas manos: salir." }),
+      el("p", { class: "muted", text: "Pellizco izq: girar 180° · Pellizco der: recalibrar · Ambas manos: salir." }),
       el("p", { class: "muted mono", text: `build ${BUILD}` }),
     ]);
     controlPanel = panel;
@@ -489,17 +499,28 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       const r = rtt.rttMs;
       const h = estimatedHeightM();
       const stats = buffer.stats;
+      const hands = handsSeen();
+      const handsLabel = { both: "ambas", left: "solo izq", right: "solo der", none: "ninguna" }[hands];
       if (host2) {
-        const hands = handsSeen();
         host2.replaceChildren(
           metric("Orientación", auto.has ? "calibrada" : "sin calibrar"),
-          metric("Manos (visor)", { both: "ambas", left: "solo izq", right: "solo der", none: "ninguna" }[hands]),
+          metric("Manos (visor)", handsLabel),
           metric("RTT", r == null ? "—" : `${r.toFixed(0)} ms`),
           metric("Altura estimada", h == null ? "—" : `${h.toFixed(2)} m`),
           metric("Antigüedad pose (local)", Number.isFinite(age) ? `${age.toFixed(0)} ms` : "—"),
           metric("Rechazadas (viejas)", String(stats.rejected)),
         );
       }
+      // Head-locked 3D HUD: visible in AR even without DOM dom-overlay support.
+      scene?.setHud([
+        `build ${BUILD}`,
+        `Orientación: ${auto.has ? "calibrada" : "sin calibrar"} · ×${auto.scale.toFixed(2)}`,
+        `Manos: ${handsLabel} · Altura ${h == null ? "—" : h.toFixed(2) + " m"}`,
+        `RTT ${r == null ? "—" : r.toFixed(0) + " ms"}`,
+        "· Pellizco izq: girar 180°",
+        "· Pellizco der: recalibrar",
+        "· Ambas manos: salir",
+      ]);
       // Report what the viewer computed back to the phone over the same channel.
       if (link?.state === "open") {
         link.send(status("metrics", undefined, { heightM: h ?? undefined, rttMs: r ?? undefined }));
@@ -515,6 +536,14 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     auto.has = false;
     const ok = calibrateScale();
     toast(ok ? `Calibrado · escala ×${auto.scale.toFixed(2)}.` : "Mostrá ambas manos al visor para calibrar.");
+  }
+
+  // Rotate the figure 180° about vertical (fixes "facing backwards"). Keeps the
+  // manual yaw within (-π, π].
+  function flipFacing(): void {
+    placement.yaw += Math.PI;
+    if (placement.yaw > Math.PI) placement.yaw -= 2 * Math.PI;
+    toast("Giré 180°.");
   }
 
   // Flip the left/right correspondence (reflection). If the figure faces the

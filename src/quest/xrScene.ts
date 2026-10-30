@@ -19,6 +19,10 @@ import {
   BufferGeometry,
   LineBasicMaterial,
   Float32BufferAttribute,
+  Mesh,
+  PlaneGeometry,
+  MeshBasicMaterial,
+  CanvasTexture,
   type BufferAttribute,
   type Matrix4,
 } from "three";
@@ -53,6 +57,10 @@ export class XrScene {
   private inXR = false;
   private grid: GridHelper;
   private container: HTMLElement;
+  // Head-locked 3D HUD (WebGL, so it is visible in AR even when the browser
+  // does not composite the DOM `dom-overlay` panel).
+  private hud?: { mesh: Mesh; canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; tex: CanvasTexture };
+  private hudLines: string[] = [];
   // desktop orbit state
   private orbit = { az: 0, el: 0.1, dist: 3, dragging: false, px: 0, py: 0 };
 
@@ -103,10 +111,65 @@ export class XrScene {
       this.handLines.push({ hand: h, seg, pos });
     }
 
+    this.initHud();
     this.setupDesktopOrbit();
     this.onResize();
     window.addEventListener("resize", this.onResize);
     this.renderer.setAnimationLoop(this.loop);
+  }
+
+  /** Replace the head-locked HUD text (one string per line). */
+  setHud(lines: string[]): void {
+    this.hudLines = lines;
+    this.drawHud();
+  }
+
+  private initHud(): void {
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 288;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const tex = new CanvasTexture(canvas);
+    const mat = new MeshBasicMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
+    const mesh = new Mesh(new PlaneGeometry(0.5, 0.281), mat);
+    mesh.renderOrder = 1000;
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    this.hud = { mesh, canvas, ctx, tex };
+    this.drawHud();
+  }
+
+  private drawHud(): void {
+    if (!this.hud) return;
+    const { ctx, canvas, tex } = this.hud;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "rgba(10,14,20,0.82)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#e6e9ef";
+    ctx.textBaseline = "top";
+    let y = 14;
+    for (const line of this.hudLines) {
+      ctx.font = line.startsWith("·") ? "22px system-ui, sans-serif" : "bold 26px system-ui, sans-serif";
+      ctx.fillStyle = line.startsWith("·") ? "#9aa4b2" : "#e6e9ef";
+      ctx.fillText(line, 16, y);
+      y += line.startsWith("·") ? 28 : 34;
+    }
+    tex.needsUpdate = true;
+  }
+
+  private updateHud(): void {
+    if (!this.hud) return;
+    const cam = this.inXR ? this.renderer.xr.getCamera() : this.camera;
+    const pos = new Vector3();
+    cam.getWorldPosition(pos);
+    const dir = new Vector3();
+    cam.getWorldDirection(dir); // -Z look direction
+    // Place a little below the line of sight so it doesn't block the figure.
+    const place = pos.clone().add(dir.multiplyScalar(0.7));
+    place.y -= 0.16;
+    this.hud.mesh.position.copy(place);
+    this.hud.mesh.lookAt(pos);
   }
 
   get floorY(): number {
@@ -216,6 +279,7 @@ export class XrScene {
   private loop = (time: number) => {
     if (!this.inXR) this.applyDesktopCamera();
     this.updateHandLines();
+    this.updateHud();
     for (const cb of this.frameCbs) cb(time / 1000);
     this.renderer.render(this.scene, this.camera);
   };

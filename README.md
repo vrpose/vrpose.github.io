@@ -203,19 +203,20 @@ Controles del panel (también dentro de AR vía *dom-overlay*):
   ajuste manual sobre la autocalibración.
 
 > **Gestos en AR** (requieren *hand-tracking* activo en el visor):
-> - **Pellizco mano izquierda**: muestra/oculta el panel.
+> - **Pellizco mano izquierda**: **gira la figura 180°** (arregla "de espaldas").
 > - **Pellizco mano derecha / gatillo**: recalibra (equivale a **D**).
-> - **Pellizco con ambas manos casi a la vez**: sale de realidad mixta. Funciona
->   aun si el panel (dom-overlay) no se muestra en tu visor.
+> - **Pellizco con ambas manos casi a la vez**: sale de realidad mixta.
+>
+> **HUD 3D:** como el panel DOM (`dom-overlay`) **no se compone en todos los
+> visores** (en algunos Quest sólo se ve al salir de AR, en el margen de la web),
+> se dibuja además un **HUD en la escena** (WebGL, siempre visible en AR) con el
+> estado (orientación, manos, escala, altura, RTT, build) y la leyenda de gestos.
+> Los gestos cubren las acciones críticas sin depender del panel DOM.
 >
 > **Depuración de manos:** las manos detectadas por el visor se dibujan como
 > **líneas de dedos** (azul = izquierda, naranja = derecha). Si no ves líneas, el
 > *hand-tracking* no está activo → no habrá autocalibración ni gestos; activalo
 > en los ajustes del visor.
->
-> **Panel en AR:** el panel usa `dom-overlay`. Si tu visor no lo soporta, usá los
-> gestos de arriba (y el botón del sistema del visor para salir como último
-> recurso).
 
 ## Rendimiento
 
