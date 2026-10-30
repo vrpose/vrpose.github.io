@@ -239,6 +239,26 @@ input[type="range"] {
   height: auto;
 }
 
+.code-big {
+  font-size: clamp(2rem, 12vw, 3.4rem);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-align: center;
+  background: var(--panel-2);
+  border: 1px solid #2a3344;
+  border-radius: 12px;
+  padding: 16px 12px;
+  color: var(--accent-2);
+  user-select: all;
+}
+
+.code-input {
+  font-size: 1.6rem !important;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  text-align: center;
+}
+
 .warning {
   color: var(--warn);
 }

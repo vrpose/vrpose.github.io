@@ -37,28 +37,43 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   // --- pairing screen ---
   function renderPairing(prefillPeer = "", prefillToken = ""): void {
     clear(page);
-    const peerInput = el("input", { type: "text", class: "grow mono", placeholder: "peer id", value: prefillPeer }) as HTMLInputElement;
-    const tokenInput = el("input", { type: "text", class: "grow mono", placeholder: "token", value: prefillToken }) as HTMLInputElement;
+    const codeInput = el("input", {
+      type: "text",
+      class: "grow mono code-input",
+      placeholder: "ABC123",
+      autocapitalize: "characters",
+      autocomplete: "off",
+      maxlength: 12,
+      value: prefillPeer,
+    }) as HTMLInputElement;
     const linkInput = el("input", { type: "text", class: "grow mono", placeholder: "pegá el enlace del QR" }) as HTMLInputElement;
     const scanHost = el("div", {});
     const msg = el("p", {});
 
     const tryConnect = (p: string, t: string) => {
       if (!p || !t) {
-        msg.textContent = "Faltan peer id y token.";
+        msg.textContent = "Falta el código de emparejamiento.";
         msg.className = "err-text";
         return;
       }
       void connect(p.trim(), t.trim());
     };
+    // The short code is both the peer id AND the token.
+    const connectWithCode = () => {
+      const code = codeInput.value.trim().toUpperCase();
+      tryConnect(code, code);
+    };
+    codeInput.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") connectWithCode();
+    });
 
     page.append(
       el("h1", { text: "Modo visor (Quest)" }),
       el("div", { class: "card" }, [
-        el("h3", { text: "Escanear QR" }),
-        el("p", { text: "Si el navegador del visor expone una cámara utilizable, podés escanear el QR del celular. Si no, usá el enlace o el formulario." }),
-        el("button", { onclick: () => void startScan(scanHost, msg) }, ["Escanear con la cámara"]),
-        scanHost,
+        el("h3", { text: "Código de emparejamiento" }),
+        el("p", { text: "Escribí el código que muestra el celular (modo cámara)." }),
+        codeInput,
+        el("button", { onclick: connectWithCode }, ["Emparejar"]),
       ]),
       el("div", { class: "card" }, [
         el("h3", { text: "Pegar enlace" }),
@@ -70,21 +85,24 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
               const parsed = parsePairingUrl(linkInput.value);
               if (parsed) tryConnect(parsed.peer, parsed.token);
               else {
-                msg.textContent = "No pude leer peer/token del enlace.";
+                msg.textContent = "No pude leer el emparejamiento del enlace.";
                 msg.className = "err-text";
               }
             },
           }, ["Conectar"]),
         ]),
       ]),
-      el("div", { class: "card" }, [
-        el("h3", { text: "Formulario manual" }),
-        el("div", { class: "row" }, [peerInput, tokenInput]),
-        el("button", { onclick: () => tryConnect(peerInput.value, tokenInput.value) }, ["Emparejar"]),
+      el("details", { class: "card" }, [
+        el("summary", { text: "Escanear QR (puede no funcionar en el visor)" }),
+        el("p", { text: "Solo si el navegador del visor expone una cámara utilizable y concede permiso. Si falla, usá el código de arriba." }),
+        el("button", { class: "secondary", onclick: () => void startScan(scanHost, msg) }, ["Escanear con la cámara"]),
+        scanHost,
       ]),
       msg,
       el("button", { class: "ghost", onclick: () => (location.hash = "#/") }, ["← Volver"]),
     );
+    void prefillToken;
+    codeInput.focus();
   }
 
   async function startScan(host: HTMLElement, msg: HTMLElement): Promise<void> {

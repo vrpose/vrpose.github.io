@@ -18,6 +18,21 @@ import { parseMessage } from "../protocol/validate";
 
 export type LinkState = "connecting" | "open" | "closed" | "error";
 
+/** Lifecycle of the camera's registration with the signalling server. */
+export type PeerStatus = "open" | "reconnecting" | "disconnected" | "closed" | "error";
+
+// Short pairing code: easy to read/type on a headset. Excludes ambiguous
+// characters (0/O, 1/I/L). ~30^6 ≈ 7e8 combinations — plenty for a prototype.
+const SHORT_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+export function generateShortCode(len = 6): string {
+  const buf = new Uint32Array(len);
+  crypto.getRandomValues(buf);
+  let s = "";
+  for (let i = 0; i < len; i++) s += SHORT_ALPHABET[buf[i] % SHORT_ALPHABET.length];
+  return s;
+}
+
 export interface SendOptions {
   /** Drop this message if the channel backlog exceeds maxBufferedBytes. */
   dropIfBusy?: boolean;
@@ -98,19 +113,65 @@ export class Link {
 
 export interface CameraPeer {
   peer: Peer;
+  /** The short pairing code (also the PeerJS id). */
   id: string;
   /** Fires once when a viewer connects. We accept a single viewer. */
   onViewer(cb: (link: Link) => void): void;
   onError(cb: (err: Error) => void): void;
+  /** Signalling-server registration status (for the "session alive" dot). */
+  onStatus(cb: (s: PeerStatus) => void): void;
   destroy(): void;
 }
 
-/** Camera side: create a peer and wait for its id, then listen for one viewer. */
-export function createCameraPeer(config: AppConfig): Promise<CameraPeer> {
-  const peer = new Peer({ config: { iceServers: config.iceServers }, debug: 1 });
+interface PeerError {
+  type?: string;
+}
+
+/** Open a PeerJS peer using a short custom id, retrying on id collisions. */
+async function openPeerWithShortId(
+  config: AppConfig,
+  attempts = 6,
+): Promise<{ peer: Peer; id: string }> {
+  for (let i = 0; i < attempts; i++) {
+    const id = generateShortCode(6);
+    const peer = new Peer(id, { config: { iceServers: config.iceServers }, debug: 1 });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Timeout abriendo la señalización")), 15000);
+        const onOpen = () => {
+          cleanup();
+          resolve();
+        };
+        const onErr = (err: PeerError) => {
+          cleanup();
+          reject(err);
+        };
+        const cleanup = () => {
+          clearTimeout(timeout);
+          peer.off("open", onOpen);
+          peer.off("error", onErr);
+        };
+        peer.on("open", onOpen);
+        peer.on("error", onErr);
+      });
+      return { peer, id };
+    } catch (err) {
+      peer.destroy();
+      if ((err as PeerError)?.type === "unavailable-id") continue; // retry a new code
+      throw err instanceof Error ? err : new Error(String((err as PeerError)?.type ?? err));
+    }
+  }
+  throw new Error("No se pudo reservar un código corto (demasiados intentos)");
+}
+
+/** Camera side: open a short-code peer, then listen for a single viewer. */
+export async function createCameraPeer(config: AppConfig): Promise<CameraPeer> {
+  const { peer, id } = await openPeerWithShortId(config);
   const viewerCbs: ((l: Link) => void)[] = [];
   const errorCbs: ((e: Error) => void)[] = [];
+  const statusCbs: ((s: PeerStatus) => void)[] = [];
   let claimed = false;
+  const status = (s: PeerStatus) => statusCbs.forEach((cb) => cb(s));
 
   peer.on("connection", (conn: DataConnection) => {
     if (claimed) {
@@ -137,23 +198,30 @@ export function createCameraPeer(config: AppConfig): Promise<CameraPeer> {
     for (const cb of errorCbs) cb(err as unknown as Error);
   });
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timeout abriendo el peer de señalización")), 15000);
-    peer.on("open", (id) => {
-      clearTimeout(timeout);
-      resolve({
-        peer,
-        id,
-        onViewer: (cb) => viewerCbs.push(cb),
-        onError: (cb) => errorCbs.push(cb),
-        destroy: () => peer.destroy(),
-      });
-    });
-    peer.on("error", (err) => {
-      clearTimeout(timeout);
-      reject(err as unknown as Error);
-    });
+  // Keep the session (and its code) alive against the signalling server.
+  peer.on("disconnected", () => {
+    status("disconnected");
+    try {
+      peer.reconnect();
+      status("reconnecting");
+    } catch {
+      /* reconnect not possible */
+    }
   });
+  peer.on("open", () => status("open")); // also fires after a successful reconnect
+  peer.on("close", () => status("closed"));
+
+  return {
+    peer,
+    id,
+    onViewer: (cb) => viewerCbs.push(cb),
+    onError: (cb) => errorCbs.push(cb),
+    onStatus: (cb) => {
+      statusCbs.push(cb);
+      cb(peer.disconnected ? "disconnected" : "open");
+    },
+    destroy: () => peer.destroy(),
+  };
 }
 
 /** Viewer side: connect to a camera peer id. Resolves when the channel opens. */

@@ -102,8 +102,13 @@ Pantalla inicial con dos opciones.
 3. Elegí cámara **frontal/trasera** y, si querés, **espejá la vista**
    (es solo visual; las coordenadas transmitidas no se alteran).
 4. Verás el video con el **esqueleto superpuesto** para comprobar el encuadre.
-5. Se crea una sesión PeerJS y aparece un **QR grande** con la URL pública +
-   `peer` + `token` aleatorio. También hay **enlace y código copiables**.
+5. Se crea una sesión PeerJS y aparece un **código corto** (6 caracteres, p.
+   ej. `ABC123`) para escribir en el visor. Un **punto de estado** indica si la
+   sesión sigue vigente ante el servidor de señalización:
+   🟢 activa · 🟡 reconectando · 🔴 caída/cerrada (se reconecta sola).
+   El QR y el enlace copiable quedan como alternativa (desplegable "Otras
+   formas"). El **código corto es a la vez el id del peer y el token** de la
+   sesión.
 6. Estados: *esperando visor → conectado → transmitiendo → conexión perdida*.
 7. Métricas: **FPS de inferencia**, **Hz de envío**, **estado de conexión**,
    **visibilidad media** de articulaciones, **paquetes descartados** y aviso de
@@ -113,14 +118,19 @@ Pantalla inicial con dos opciones.
 
 ### 🥽 Modo Quest (visor)
 
-Podés entrar desde: **el QR**, un **enlace pegado** o el **formulario manual**.
+Métodos de emparejamiento, en orden de fiabilidad en el visor:
 
-1. **Escaneo de QR**: solo si el navegador del visor expone una cámara
-   utilizable y concede permiso. Si no, se ofrece de inmediato el flujo manual
+1. **Código corto** (recomendado): escribís los 6 caracteres que muestra el
+   celular. Es el método principal porque en varios visores el acceso a la
+   cámara para escanear no está disponible o abre la cámara del sistema.
+2. **Pegar enlace**: pegás la URL del QR.
+3. **Escanear QR** (último, puede fallar): solo si el navegador del visor
+   expone una cámara utilizable y concede permiso. Si no, usás el código corto
    (la falta de cámara **no** bloquea nada). El escaneo ocurre **antes** de
    entrar en modo inmersivo.
    > WebXR **no** entrega los frames del passthrough a la página; por eso el
-   > escaneo usa la cámara normal (`getUserMedia`) si existe.
+   > escaneo usa la cámara normal (`getUserMedia`) si existe, y en muchos
+   > visores no hay una cámara utilizable para esto.
 2. Al emparejar, se muestra el **estado de recepción**.
 3. Botón explícito **"Entrar en realidad mixta"** → sesión WebXR
    `immersive-ar` con **fondo transparente** (passthrough).

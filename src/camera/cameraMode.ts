@@ -44,7 +44,7 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
     mirrored: true,
     seq: 0,
     latest: null,
-    token: crypto.randomUUID().slice(0, 8),
+    token: "", // set to the short pairing code once the peer opens
     accepted: false,
     infCount: 0,
     sendCount: 0,
@@ -262,36 +262,39 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
       );
       return;
     }
+    // The short pairing code IS the peer id; it also serves as the session
+    // token for the handshake (see README: short-code path).
+    state.token = cameraPeer.id;
     state.phase = "waiting";
     refreshStatus();
 
-    const params = new URLSearchParams({ peer: cameraPeer.id, token: state.token });
+    const code = cameraPeer.id;
+    const params = new URLSearchParams({ peer: code, token: code });
     const url = absoluteUrl("/quest", params);
     const qr = await renderQr(url);
 
+    const sessionDot = el("span", { class: "status" }, [el("span", { class: "dot wait" }), "Sesión"]);
+    cameraPeer.onStatus((s) => updateSessionDot(sessionDot, s));
+
     clear(pairingHost);
     pairingHost.append(
-      el("h3", { text: "3 · Emparejar con el visor" }),
-      el("p", { text: "Escaneá este QR desde el Meta Quest, o pegá el enlace / código manualmente." }),
-      el("div", { class: "qr" }, [qr]),
-      el("label", {}, [
-        "Enlace de emparejamiento",
-        row(
-          el("input", { type: "text", class: "grow mono", value: url, readonly: true }),
-          copyBtn(url),
-        ),
-      ]),
-      el("label", {}, [
-        "Código manual (peer · token)",
-        row(
-          el("input", {
-            type: "text",
-            class: "grow mono",
-            value: `${cameraPeer.id}#${state.token}`,
-            readonly: true,
-          }),
-          copyBtn(`${cameraPeer.id}#${state.token}`),
-        ),
+      el("div", { class: "row" }, [el("h3", { class: "grow", text: "3 · Emparejar con el visor" }), sessionDot]),
+      el("p", {
+        html: "En el visor, elegí <b>Código de emparejamiento</b> y escribí este código:",
+      }),
+      el("div", { class: "code-big mono" }, [code]),
+      row(copyBtn(code)),
+      el("details", {}, [
+        el("summary", { text: "Otras formas (QR / enlace)" }),
+        el("p", {
+          class: "muted",
+          text: "El escaneo de QR puede no funcionar en algunos visores. Si falla, usá el código de arriba.",
+        }),
+        el("div", { class: "qr" }, [qr]),
+        el("label", {}, [
+          "Enlace de emparejamiento",
+          row(el("input", { type: "text", class: "grow mono", value: url, readonly: true }), copyBtn(url)),
+        ]),
       ]),
     );
 
@@ -299,6 +302,18 @@ export function mountCamera(container: HTMLElement, route: Route): () => void {
     cameraPeer.onError((err) => {
       warnHost.replaceChildren(el("p", { class: "warning", text: `Señalización: ${err.message}` }));
     });
+  }
+
+  function updateSessionDot(pill: HTMLElement, s: string): void {
+    const map: Record<string, [string, string]> = {
+      open: ["ok", "Sesión activa"],
+      reconnecting: ["warn", "Reconectando…"],
+      disconnected: ["err", "Sesión caída"],
+      closed: ["err", "Sesión cerrada"],
+      error: ["err", "Error de sesión"],
+    };
+    const [kind, label] = map[s] ?? ["wait", "Sesión"];
+    pill.replaceChildren(el("span", { class: `dot ${kind}` }), label);
   }
 
   function bindViewer(l: Link): void {
