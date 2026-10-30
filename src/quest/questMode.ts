@@ -400,6 +400,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     modeBtn.addEventListener("click", () => setMode(placement.mode === "mirror" ? "overlay" : "mirror"));
 
     const panel = el("div", { class: "card" }, [
+      el("button", { onclick: () => void exitStage() }, ["⏹ Salir de realidad mixta"]),
       modeBtn,
       abRow,
       mirrorOnly,
@@ -417,7 +418,6 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       ]),
       el("div", { id: "ql-metrics", class: "metrics" }),
       el("p", { class: "muted", text: "Pellizco con la mano izquierda: mostrar/ocultar este panel." }),
-      el("button", { class: "ghost", onclick: () => void exitStage() }, ["Salir"]),
     ]);
     applyModeLabel();
     controlPanel = panel;
