@@ -161,17 +161,21 @@ figura se **ancla a tu cuerpo** y te sigue por la sala, de forma **estable**:
 
 - El **eje vertical se fija al "arriba" real** (gravedad, del giroscopio del
   visor): el esqueleto **nunca se invierte** (no más "pies en el techo").
-- La **orientación (yaw) sale del tracker de manos**, no de la mirada. Al
-  calibrar resolvemos la correspondencia **cabeza + ambas muñecas ↔ visor +
-  ambas manos** (`similarityFrom3Points`) y nos quedamos con el **yaw puro** de
-  esa rotación (descomposición Euler `YXZ`): así la figura **mira hacia donde
-  mira tu cuerpo real** y las muñecas del esqueleto **coinciden con tus manos
-  detectadas**. Se resuelve una vez y se **mantiene** (girar o inclinar la
-  cabeza ya no rota el cuerpo: eso era el "cuello ortopédico"). Se asume que el
-  celular **filma de frente** (a lo sumo ~60° de cada lado), por lo que el signo
-  de profundidad de la pose es confiable. Las métricas del panel muestran
-  *Orientación* (calibrada/sin calibrar) y *Manos (visor)* para diagnosticar: si
-  dice "ninguna", el *hand-tracking* no está activo y no habrá autocalibración.
+- La calibración **alinea las dos muñecas**: muñeca izq/der de la pose ↔ muñeca
+  izq/der del *hand-tracking*. Como la correspondencia de manos es conocida y el
+  celular **filma de frente** (≤~60° de cada lado), el vector dirigido
+  **muñeca-izquierda → muñeca-derecha** determina sin ambigüedad:
+  - **escala** = separación de muñecas real / separación en la pose;
+  - **yaw** = rotación que alinea ese vector en horizontal (con "arriba" por
+    gravedad, así nunca se tumba ni se da vuelta frente/espalda);
+  - **posición** = traslación para que el **punto medio de las muñecas
+    coincida**.
+  El resultado se **mantiene**, de modo que las muñecas del esqueleto quedan
+  **tocando tus manos** y no se recalcula por frame (eso metía ruido). Girar o
+  inclinar la cabeza ya no mueve el cuerpo (no más "cuello ortopédico"). Las
+  métricas/HUD muestran *Orientación* (calibrada/sin calibrar) y *Manos (visor)*:
+  si dice "ninguna", el *hand-tracking* no está activo y no habrá
+  autocalibración.
 - El cuerpo se **ancla horizontalmente al centro de la cadera** (el *core*, que
   es estable), no a la cabeza, así mover o girar la cabeza **no hace bailar los
   pies**. La altura de la cabeza sí se alinea con el visor, de modo que el

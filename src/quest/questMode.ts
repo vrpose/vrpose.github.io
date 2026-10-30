@@ -1,4 +1,4 @@
-import { Euler, Quaternion, Vector3 } from "three";
+import { Quaternion, Vector3 } from "three";
 import { el, clear, statusPill, type StatusKind } from "../ui/dom";
 import type { Route } from "../router";
 import { resolveConfig, BUILD } from "../config";
@@ -9,7 +9,7 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { measureModelHeight, similarityFrom3Points, worldLandmarkToLocal } from "../math/transforms";
+import { measureModelHeight, worldLandmarkToLocal } from "../math/transforms";
 import { LM, POSE_LANDMARK_COUNT } from "../pose/landmarks";
 import { parsePairingUrl } from "./pairing";
 import { hello, ping, reset, status, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
@@ -34,7 +34,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   // Only one placement remains: "Sobre mí" (first-person overlay). The old
   // mirror placement was removed — orientation now comes from the hand tracker
-  // (see calibrateScale), which makes a separate mirror mode unnecessary and
+  // (see calibrateAlign), which makes a separate mirror mode unnecessary and
   // removed a source of back-to-front errors.
   const placement = {
     height: 0,
@@ -45,16 +45,18 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let controlPanel: HTMLElement | null = null;
   let arOverlayRoot: HTMLElement | null = null;
 
-  // Overlay auto-calibration, solved ONCE from 3 point correspondences
-  // (head↔headset and both wrists↔tracked hands). We keep the rotation-invariant
-  // SCALE and the YAW: the yaw is the horizontal component of the solved rotation
-  // (gravity-locked, so the figure can't tip), which is what makes the figure
-  // FACE correctly and the wrists coincide with the tracked hands — the headset
-  // gaze is NOT used for orientation. Held after solving to avoid jitter.
-  const auto = { scale: 1, yaw: new Quaternion(), has: false };
+  // Overlay auto-calibration, solved ONCE (D / right pinch) by aligning the two
+  // WRISTS: pose LEFT/RIGHT wrist ↔ hand-tracking left/right wrist. Because the
+  // hand correspondence is known and the phone films from the front (≤~60°), the
+  // directed vector leftWrist→rightWrist fixes, unambiguously:
+  //   - SCALE  = world wrist separation / pose wrist separation,
+  //   - YAW    = rotation aligning that vector horizontally (gravity up kept, so
+  //              the figure never tips and front/back is never flipped),
+  //   - POS    = translation so the wrist MIDPOINT coincides.
+  // The result is held so the pose's real wrists sit on the tracked hands.
+  const auto = { scale: 1, yaw: new Quaternion(), pos: new Vector3(), has: false };
 
-  // Position anchor for the overlay figure. Low-pass filtered so quick head
-  // motion is damped while slow body translation (walking) still tracks.
+  // Position smoothing so a recalibration eases in rather than popping.
   const anchor = { pos: new Vector3(), posInit: false, lastT: 0 };
   function resetAnchor(): void {
     anchor.posInit = false;
@@ -348,68 +350,36 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     }
     skeleton.setGlobalOpacity(1);
     const mapped = mapper.map(buffered.pose, cal, tSec);
-    // Placement needs the mapped pose (to anchor to the body), so it runs after
-    // mapping and before the skeleton update.
-    placeOverlay(mapped.positions, tSec);
+    placeOverlay(tSec);
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
-  // Overlay placement (stable, never upside-down, no "neck brace"):
-  //  - Vertical axis is locked to world up (gravity, from the headset), so the
-  //    figure can never flip (no "feet on ceiling").
-  //  - Yaw comes from the HAND TRACKER, not the gaze: calibrateScale solves the
-  //    head+two-wrists correspondence and we keep its horizontal (yaw) component,
-  //    so the figure faces the way your real body does and the wrists line up
-  //    with the tracked hands. It is solved ONCE and HELD (turning/tilting your
-  //    head no longer rotates the body).
-  //  - Horizontal position is anchored to the stable HIP CENTRE (the body core),
-  //    not the head, so head bobbing/looking around doesn't swing the feet. The
-  //    head height is still matched to the headset so the core sits BELOW it.
-  //  - The anchor position is low-pass filtered: quick head motion is damped,
-  //    slow body translation (walking) still tracks over ~0.5 s.
+  // Overlay placement: apply the held wrist-aligned transform (+ manual nudges).
+  // No per-frame headset read, so head motion never drags the body ("neck
+  // brace"), and yaw-only keeps it gravity-upright (never "feet on ceiling").
   const UP = new Vector3(0, 1, 0);
-  function placeOverlay(positions: (Vector3 | null)[], tSec: number): void {
+  function placeOverlay(tSec: number): void {
     if (!scene || !skeleton) return;
-    if (!auto.has) calibrateScale(); // one-shot until both hands are seen
+    if (!auto.has) calibrateAlign(); // lazy one-shot until both hands are seen
     const s = auto.scale * placement.scale;
-    const vp = scene.readViewerPose();
-
-    // Orientation: the auto yaw from the hands, plus any manual fine-tune.
     const q = auto.yaw.clone();
     if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(UP, placement.yaw));
     skeleton.root.quaternion.copy(q);
     skeleton.root.scale.setScalar(s);
 
-    const localHead = positions[LM.NOSE];
-    if (!localHead) return;
-    // Stable horizontal reference: hip centre (falls back to head if missing).
-    const lHip = positions[LM.LEFT_HIP];
-    const rHip = positions[LM.RIGHT_HIP];
-    const localCore = lHip && rHip ? lHip.clone().add(rHip).multiplyScalar(0.5) : localHead.clone();
-
-    // Solve the root so the figure's CORE sits under the headset horizontally and
-    // its HEAD sits at the headset height:
-    //   world = pos + q·(s·local)  ⇒  pos = anchorWorld − q·(s·localRef)
-    const wCore = localCore.clone().multiplyScalar(s).applyQuaternion(q);
-    const wHead = localHead.clone().multiplyScalar(s).applyQuaternion(q);
-    const target = new Vector3(
-      vp.position.x - wCore.x,
-      vp.position.y - wHead.y + placement.height,
-      vp.position.z - wCore.z,
-    );
+    const target = auto.pos.clone();
+    target.y += placement.height;
     if (placement.forward) {
       const fwd = new Vector3(0, 0, 1).applyQuaternion(q);
       target.x += fwd.x * placement.forward;
       target.z += fwd.z * placement.forward;
     }
-
     if (!anchor.posInit) {
       anchor.pos.copy(target);
       anchor.posInit = true;
     } else {
       const dt = Math.max(0, Math.min(0.1, tSec - anchor.lastT));
-      const tau = 0.5; // seconds; larger = steadier, laggier
-      anchor.pos.lerp(target, 1 - Math.exp(-dt / tau));
+      anchor.pos.lerp(target, 1 - Math.exp(-dt / 0.25)); // ease recalibration
     }
     anchor.lastT = tSec;
     skeleton.root.position.copy(anchor.pos);
@@ -425,35 +395,43 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     return span * auto.scale * placement.scale;
   }
 
-  // One-shot auto-calibration from the 3-point correspondence (head + both
-  // wrists ↔ headset + both tracked hands). We keep:
-  //   - SCALE: rotation-invariant, so stable even as the arms move;
-  //   - YAW: the pure horizontal (yaw) component of the solved rotation R,
-  //     extracted via an Euler YXZ decomposition (R = Ry·Rx·Rz → take Ry). This
-  //     aligns the figure's facing with the real body while staying gravity-
-  //     upright (pitch/roll dropped), independent of which local axis is "front".
-  // The phone always films from the front (≤~60° off-axis), so the pose depth
-  // sign is reliable and the hand correspondence is well-posed.
+  // One-shot alignment of the two wrists (pose ↔ hand tracking). See the `auto`
+  // comment: known L/R correspondence + frontal camera make this unambiguous, so
+  // the figure faces correctly (no 180° guesswork) and the wrists coincide.
   // Called on demand (D / right pinch), not every frame.
-  function calibrateScale(): boolean {
+  function calibrateAlign(): boolean {
     if (!scene) return false;
-    const buffered = buffer.peek();
-    const wl = buffered?.pose.worldLandmarks;
+    const wl = buffer.peek()?.pose.worldLandmarks;
     if (!wl || wl.length < POSE_LANDMARK_COUNT) return false;
-    const lw = scene.wristWorld("left");
-    const rw = scene.wristWorld("right");
-    if (!lw || !rw) return false; // need both hands tracked
-    const head = scene.readViewerPose().position;
-    const localHead = worldLandmarkToLocal(wl[LM.NOSE], cal.mirror);
-    const localL = worldLandmarkToLocal(wl[LM.LEFT_WRIST], cal.mirror);
-    const localR = worldLandmarkToLocal(wl[LM.RIGHT_WRIST], cal.mirror);
-    const t = similarityFrom3Points([localHead, localL, localR], [head, lw, rw]);
-    if (!t) return false;
-    auto.scale = Math.min(2.5, Math.max(0.3, t.scale));
-    const e = new Euler().setFromQuaternion(t.quaternion, "YXZ");
-    auto.yaw = new Quaternion().setFromAxisAngle(UP, e.y);
+    const LWw = scene.wristWorld("left");
+    const RWw = scene.wristWorld("right");
+    if (!LWw || !RWw) return false; // need both hands tracked
+    const lw = worldLandmarkToLocal(wl[LM.LEFT_WRIST], cal.mirror);
+    const rw = worldLandmarkToLocal(wl[LM.RIGHT_WRIST], cal.mirror);
+
+    const sepLocal = lw.distanceTo(rw);
+    const sepWorld = LWw.distanceTo(RWw);
+    if (sepLocal < 1e-3 || sepWorld < 1e-3) return false;
+    const s = Math.min(2.5, Math.max(0.3, sepWorld / sepLocal));
+
+    // Yaw: rotate the pose's horizontal left→right wrist vector onto the real
+    // one. Both lie in the XZ plane, so this quaternion is pure yaw.
+    const dirLocal = new Vector3(rw.x - lw.x, 0, rw.z - lw.z);
+    const dirWorld = new Vector3(RWw.x - LWw.x, 0, RWw.z - LWw.z);
+    if (dirLocal.lengthSq() < 1e-6 || dirWorld.lengthSq() < 1e-6) return false;
+    const q = new Quaternion().setFromUnitVectors(dirLocal.normalize(), dirWorld.normalize());
+
+    // Translation: make the wrist midpoints coincide.
+    const midLocal = lw.clone().add(rw).multiplyScalar(0.5);
+    const midWorld = LWw.clone().add(RWw).multiplyScalar(0.5);
+    const p = midWorld.clone().sub(midLocal.clone().multiplyScalar(s).applyQuaternion(q));
+
+    auto.scale = s;
+    auto.yaw = q;
+    auto.pos = p;
     auto.has = true;
-    resetAnchor(); // re-center position on the next frame with the new yaw
+    placement.yaw = 0; // clear any manual 180° flip; auto now aims it
+    resetAnchor();
     return true;
   }
 
@@ -531,10 +509,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   const overlayTimers: number[] = [];
 
-  // Full recalibrate: re-solve scale AND yaw from head + both hands.
+  // Recalibrate: align both wrists (pose ↔ hand tracking).
   function captureReference(): void {
     auto.has = false;
-    const ok = calibrateScale();
+    const ok = calibrateAlign();
     toast(ok ? `Calibrado · escala ×${auto.scale.toFixed(2)}.` : "Mostrá ambas manos al visor para calibrar.");
   }
 
@@ -552,8 +530,8 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     cal.mirror = !cal.mirror;
     mapper.reset();
     skeleton?.resetRetained();
-    auto.has = false; // re-solve yaw/scale under the new correspondence
-    const ok = calibrateScale();
+    auto.has = false; // re-solve under the new correspondence
+    const ok = calibrateAlign();
     toast(
       `Izq/der: ${cal.mirror ? "espejo" : "directo"}.` +
         (ok ? " Recalibrado." : " Mostrá ambas manos para recalibrar."),
