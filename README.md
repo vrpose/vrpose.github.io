@@ -149,7 +149,22 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
 3. **Mundo** — coordenadas de la sala en WebXR, donde realmente ubicamos la
    figura.
 
-Pasos (controles en el panel, también dentro de AR vía *dom-overlay*):
+**Dos modos de colocación** (botón *Modo* en el panel):
+
+- **Espejo (enfrente)**: la figura se coloca entre vos y el celular, como un
+  reflejo. Es el modo por defecto.
+- **Sobre mí (primera persona)**: la figura se **ancla al visor** y te sigue por
+  la sala usando el tracking 6DoF del Quest para la posición/orientación, y la
+  pose del celular para las articulaciones. Útil para comprobar la sincronía
+  cuerpo↔tracker. Limitaciones: la orientación del torso se aproxima con el
+  *yaw* del visor (si girás la cabeza sin girar el cuerpo, la figura rota con la
+  cabeza), y brazos/piernas pueden desajustarse por la ambigüedad de
+  profundidad monocular; se ajusta con *Escala*, *Rotación*, *Altura* y
+  *Adelante/atrás*. En este modo no hace falta marcar el celular (A/B); solo
+  *Capturar escala (D)* parado.
+
+Pasos del modo espejo (controles en el panel, también dentro de AR vía
+*dom-overlay*):
 
 - **A · Posición del usuario**: guarda tu posición y orientación horizontal al
   pulsar *Calibrar*.

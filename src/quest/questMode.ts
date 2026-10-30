@@ -1,4 +1,4 @@
-import { Vector3 } from "three";
+import { Quaternion, Vector3 } from "three";
 import { el, clear, statusPill, type StatusKind } from "../ui/dom";
 import type { Route } from "../router";
 import { resolveConfig } from "../config";
@@ -9,7 +9,7 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { buildMirrorFrame } from "../math/transforms";
+import { buildMirrorFrame, yawFacing } from "../math/transforms";
 import { parsePairingUrl } from "./pairing";
 import { hello, ping, reset, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
 
@@ -29,7 +29,15 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let pingTimer = 0;
   let disposed = false;
 
-  const placement = { fraction: 0.5, lateral: 0, height: 0, scale: 1, yaw: 0 };
+  const placement = {
+    mode: "mirror" as "mirror" | "overlay",
+    fraction: 0.5,
+    lateral: 0,
+    height: 0,
+    scale: 1,
+    yaw: 0,
+    forward: 0, // overlay: shift along the body's facing direction
+  };
   let userPos: Vector3 | null = null;
   let phonePos: Vector3 | null = null;
   let markPhoneArmed = false;
@@ -263,6 +271,9 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
   function renderFrame(tSec: number): void {
     if (!scene || !skeleton) return;
+    // In "overlay" mode the figure is anchored to the headset every frame so it
+    // tracks your real position/orientation in the room (6DoF from WebXR).
+    if (placement.mode === "overlay") anchorOverlay();
     const buffered = buffer.peek();
     const age = buffer.ageMs(nowEpochMs());
     if (!buffered || age > cfg.maxPoseAgeMs) {
@@ -275,8 +286,30 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
+  // Overlay anchor: root sits at the headset's floor-projected position, facing
+  // the headset's forward direction. Feet rest on the floor (the mapper already
+  // offsets them), head lands near yours when the scale is calibrated.
+  function anchorOverlay(): void {
+    if (!scene || !skeleton) return;
+    const vp = scene.readViewerPose();
+    const fwd = vp.forwardXZ;
+    skeleton.root.position.set(
+      vp.position.x + fwd.x * placement.forward,
+      scene.floorY + placement.height,
+      vp.position.z + fwd.z * placement.forward,
+    );
+    const q = yawFacing(fwd);
+    if (placement.yaw) q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), placement.yaw));
+    skeleton.root.quaternion.copy(q);
+    skeleton.root.scale.setScalar(placement.scale);
+  }
+
   function recomputeFrame(): void {
     if (!scene || !skeleton) return;
+    if (placement.mode === "overlay") {
+      anchorOverlay();
+      return;
+    }
     if (!userPos || !phonePos) return;
     const frame = buildMirrorFrame({
       userPos,
@@ -300,9 +333,9 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       return el("label", {}, [label, input]);
     };
 
-    const panel = el("div", { class: "card" }, [
-      el("div", { class: "row" }, [
-        el("button", { onclick: () => {
+    const modeBtn = el("button", {}, []);
+    const abRow = el("div", { class: "row" }, [
+      el("button", { onclick: () => {
           if (!scene) return;
           const vp = scene.readViewerPose();
           userPos = vp.position.clone();
@@ -311,8 +344,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
           recomputeFrame();
           toast("Posición del usuario calibrada.");
         } }, ["A · Calibrar mi posición"]),
-        el("button", { class: "secondary", onclick: () => { markPhoneArmed = true; toast("Apuntá al piso donde está el celular y apretá el gatillo."); } }, ["B · Marcar celular (gatillo)"]),
-      ]),
+      el("button", { class: "secondary", onclick: () => { markPhoneArmed = true; toast("Apuntá al piso donde está el celular y apretá el gatillo."); } }, ["B · Marcar celular (gatillo)"]),
+    ]);
+    // Controls that only make sense for the mirror placement.
+    const mirrorOnly = el("div", {}, [
       el("details", {}, [
         el("summary", { text: "Celular manual (distancia y dirección)" }),
         el("div", { class: "row" }, [
@@ -322,6 +357,31 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       ]),
       slider("Distancia al espejo (fracción)", 0.1, 0.9, 0.01, placement.fraction, (v) => { placement.fraction = v; recomputeFrame(); }),
       slider("Lateral (m)", -1.5, 1.5, 0.02, placement.lateral, (v) => { placement.lateral = v; recomputeFrame(); }),
+    ]);
+
+    const applyModeLabel = () => {
+      modeBtn.textContent = placement.mode === "mirror" ? "Modo: Espejo (enfrente)" : "Modo: Sobre mí (primera persona)";
+      // A/B (phone position) and the mirror-only sliders are irrelevant in overlay.
+      abRow.classList.toggle("hidden", placement.mode === "overlay");
+      mirrorOnly.classList.toggle("hidden", placement.mode === "overlay");
+    };
+    const setMode = (m: "mirror" | "overlay") => {
+      placement.mode = m;
+      // Mirror reflection applies in "mirror" mode; a self-overlay is direct.
+      cal.mirror = m === "mirror";
+      mapper.reset();
+      skeleton?.resetRetained();
+      applyModeLabel();
+      recomputeFrame();
+      toast(m === "overlay" ? "Overlay anclado al visor. Calibrá la escala (D) parado." : "Modo espejo.");
+    };
+    modeBtn.addEventListener("click", () => setMode(placement.mode === "mirror" ? "overlay" : "mirror"));
+
+    const panel = el("div", { class: "card" }, [
+      modeBtn,
+      abRow,
+      mirrorOnly,
+      slider("Adelante/atrás (m)", -1, 1, 0.02, placement.forward, (v) => { placement.forward = v; recomputeFrame(); }),
       slider("Altura (m)", -1, 1, 0.01, placement.height, (v) => { placement.height = v; recomputeFrame(); }),
       slider("Escala", 0.5, 1.8, 0.01, placement.scale, (v) => { placement.scale = v; recomputeFrame(); }),
       slider("Rotación (rad)", -Math.PI, Math.PI, 0.02, placement.yaw, (v) => { placement.yaw = v; recomputeFrame(); }),
@@ -336,6 +396,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
       el("div", { id: "ql-metrics", class: "metrics" }),
       el("button", { class: "ghost", onclick: () => void exitStage() }, ["Salir"]),
     ]);
+    applyModeLabel();
     host.append(panel);
 
     // live metrics in overlay
