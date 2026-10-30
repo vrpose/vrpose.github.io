@@ -10,7 +10,7 @@
 //   3. World space   — WebXR room coordinates (meters, y up), where we actually
 //                       place the mirror figure.
 
-import { Quaternion, Vector3 } from "three";
+import { Matrix4, Quaternion, Vector3 } from "three";
 import type { Landmark } from "../protocol/messages";
 
 const UP = new Vector3(0, 1, 0);
@@ -156,4 +156,60 @@ export function estimateLateralShift(params: {
 /** Midpoint of two landmarks' normalised x (e.g. hip centre). */
 export function normXCenter(a: Landmark, b: Landmark): number {
   return (a.x + b.x) / 2;
+}
+
+/**
+ * Similarity transform (uniform scale + rotation + translation) that best maps
+ * three LOCAL points onto three WORLD points. We use it to auto-place the
+ * figure from known correspondences: head↔headset and the two wrists↔tracked
+ * hands. Three non-collinear points fully determine a proper similarity.
+ *
+ * Point order (both arrays): [head, leftWrist, rightWrist].
+ * Returns a transform where world ≈ position + quaternion·(scale·local),
+ * which matches three.js Object3D composition, or null if degenerate.
+ */
+export function similarityFrom3Points(
+  local: [Vector3, Vector3, Vector3],
+  world: [Vector3, Vector3, Vector3],
+): { position: Vector3; quaternion: Quaternion; scale: number } | null {
+  const lf = orthoFrame(local);
+  const wf = orthoFrame(world);
+  if (!lf || !wf || lf.scale < 1e-6) return null;
+
+  // R = Wbasis · Lbasisᵀ (both orthonormal, right-handed → R is a proper rotation).
+  const R = new Matrix4().multiplyMatrices(wf.basis, lf.basis.clone().transpose());
+  const quaternion = new Quaternion().setFromRotationMatrix(R);
+  const scale = wf.scale / lf.scale;
+
+  const lc = centroid3(local);
+  const wc = centroid3(world);
+  const position = wc.clone().sub(lc.clone().applyQuaternion(quaternion).multiplyScalar(scale));
+  return { position, quaternion, scale };
+}
+
+function centroid3(p: [Vector3, Vector3, Vector3]): Vector3 {
+  return p[0].clone().add(p[1]).add(p[2]).multiplyScalar(1 / 3);
+}
+
+/** Orthonormal right-handed frame + RMS size from a point triple. */
+function orthoFrame(
+  p: [Vector3, Vector3, Vector3],
+): { basis: Matrix4; scale: number } | null {
+  const c = centroid3(p);
+  // x: left wrist → right wrist.
+  const x = p[2].clone().sub(p[1]);
+  if (x.lengthSq() < 1e-10) return null;
+  x.normalize();
+  // up-ish: wrist midpoint → head, orthogonalised against x.
+  const up = p[0].clone().sub(p[1].clone().add(p[2]).multiplyScalar(0.5));
+  up.sub(x.clone().multiplyScalar(up.dot(x)));
+  if (up.lengthSq() < 1e-10) return null; // collinear
+  up.normalize();
+  const z = new Vector3().crossVectors(x, up).normalize();
+  up.crossVectors(z, x).normalize(); // re-orthogonalise for a clean basis
+  const basis = new Matrix4().makeBasis(x, up, z);
+  const scale = Math.sqrt(
+    (p[0].distanceToSquared(c) + p[1].distanceToSquared(c) + p[2].distanceToSquared(c)) / 3,
+  );
+  return { basis, scale };
 }

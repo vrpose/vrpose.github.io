@@ -33,6 +33,7 @@ export class XrScene {
   readonly renderer: WebGLRenderer;
   readonly camera = new PerspectiveCamera(60, 1, 0.01, 50);
   readonly controllers: Group[] = [];
+  readonly hands: Group[] = [];
   private frameCbs: FrameCallback[] = [];
   private floorYValue = 0;
   private inXR = false;
@@ -63,8 +64,15 @@ export class XrScene {
     for (let i = 0; i < 2; i++) {
       const c = this.renderer.xr.getController(i);
       c.add(makeRayLine());
+      bindHandedness(c);
       this.scene.add(c);
       this.controllers.push(c);
+
+      // Hand-tracking space (joints populated when hand tracking is active).
+      const h = this.renderer.xr.getHand(i);
+      bindHandedness(h);
+      this.scene.add(h);
+      this.hands.push(h);
     }
 
     this.setupDesktopOrbit();
@@ -127,6 +135,30 @@ export class XrScene {
     if (forwardXZ.lengthSq() < 1e-8) forwardXZ.set(0, 0, -1);
     forwardXZ.normalize();
     return { position, forwardXZ };
+  }
+
+  /**
+   * World position of a wrist for the given handedness. Prefers the hand-tracking
+   * 'wrist' joint; falls back to the controller position. Null if unavailable.
+   */
+  wristWorld(handedness: "left" | "right"): Vector3 | null {
+    for (const h of this.hands) {
+      if (h.userData.handedness !== handedness) continue;
+      const joints = (h as unknown as { joints?: Record<string, { getWorldPosition: (v: Vector3) => Vector3; visible?: boolean }> }).joints;
+      const wrist = joints?.["wrist"];
+      if (wrist) {
+        const v = new Vector3();
+        wrist.getWorldPosition(v);
+        if (Number.isFinite(v.x) && (v.x !== 0 || v.y !== 0 || v.z !== 0)) return v;
+      }
+    }
+    for (const c of this.controllers) {
+      if (c.userData.handedness !== handedness) continue;
+      const v = new Vector3();
+      c.getWorldPosition(v);
+      if (v.x !== 0 || v.y !== 0 || v.z !== 0) return v;
+    }
+    return null;
   }
 
   /** Controller ray → intersection with the floor plane (y = floorY). */
@@ -210,6 +242,20 @@ export class XrScene {
   private onWheel = (e: WheelEvent) => {
     this.orbit.dist = Math.max(1, Math.min(8, this.orbit.dist + Math.sign(e.deltaY) * 0.3));
   };
+}
+
+/** Track an input source's handedness on a controller/hand Object3D. */
+function bindHandedness(obj: Group): void {
+  const ev = obj as unknown as {
+    addEventListener: (t: string, cb: (e: { data?: { handedness?: string } }) => void) => void;
+    userData: { handedness?: string };
+  };
+  ev.addEventListener("connected", (e) => {
+    ev.userData.handedness = e.data?.handedness;
+  });
+  ev.addEventListener("disconnected", () => {
+    ev.userData.handedness = undefined;
+  });
 }
 
 function makeRayLine(): Line {

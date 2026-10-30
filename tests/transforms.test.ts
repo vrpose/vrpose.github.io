@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Vector3 } from "three";
+import { Quaternion } from "three";
 import {
   buildMirrorFrame,
   reflectAcrossPlane,
@@ -8,6 +9,7 @@ import {
   measureModelHeight,
   estimateLateralShift,
   yawFacing,
+  similarityFrom3Points,
 } from "../src/math/transforms";
 
 describe("reflectAcrossPlane", () => {
@@ -124,5 +126,39 @@ describe("scale and lateral estimation", () => {
     const direct = estimateLateralShift({ hipCenterNormX: 0.75, mirror: false, ...common });
     expect(mirrored).toBeCloseTo(-0.5, 10); // (0.75-0.5)*2 * -1
     expect(direct).toBeCloseTo(0.5, 10);
+  });
+});
+
+describe("similarityFrom3Points (auto-calibration)", () => {
+  const V = (x: number, y: number, z: number) => new Vector3(x, y, z);
+  const local: [Vector3, Vector3, Vector3] = [V(0, 0.6, 0), V(-0.3, 0, 0.1), V(0.3, 0, -0.1)];
+
+  it("recovers a known similarity transform (maps all 3 points)", () => {
+    const s = 1.5;
+    const R = new Quaternion().setFromAxisAngle(V(0, 1, 0), Math.PI / 2);
+    const t = V(1, 1.6, -2);
+    const world = local.map((p) => p.clone().applyQuaternion(R).multiplyScalar(s).add(t)) as [
+      Vector3,
+      Vector3,
+      Vector3,
+    ];
+
+    const sol = similarityFrom3Points(local, world);
+    expect(sol).not.toBeNull();
+    expect(sol!.scale).toBeCloseTo(s, 4);
+    // The solved transform must reproduce each world point.
+    for (let i = 0; i < 3; i++) {
+      const mapped = local[i]
+        .clone()
+        .applyQuaternion(sol!.quaternion)
+        .multiplyScalar(sol!.scale)
+        .add(sol!.position);
+      expect(mapped.distanceTo(world[i])).toBeCloseTo(0, 4);
+    }
+  });
+
+  it("returns null for collinear points", () => {
+    const collinear: [Vector3, Vector3, Vector3] = [V(0, 0, 0), V(1, 0, 0), V(2, 0, 0)];
+    expect(similarityFrom3Points(collinear, collinear)).toBeNull();
   });
 });

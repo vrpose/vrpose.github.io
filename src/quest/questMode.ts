@@ -9,7 +9,8 @@ import { SkeletonRenderer } from "./skeleton";
 import { PoseMapper, defaultCalibration, type Calibration } from "./poseMapper";
 import { LatestPoseBuffer } from "../protocol/queue";
 import { RttMeter } from "../protocol/clock";
-import { buildMirrorFrame, yawFacing } from "../math/transforms";
+import { buildMirrorFrame, similarityFrom3Points, worldLandmarkToLocal, yawFacing } from "../math/transforms";
+import { LM, POSE_LANDMARK_COUNT } from "../pose/landmarks";
 import { parsePairingUrl } from "./pairing";
 import { hello, ping, reset, nowEpochMs, type ProtocolMessage } from "../protocol/messages";
 
@@ -26,11 +27,13 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   const buffer = new LatestPoseBuffer();
   const rtt = new RttMeter();
   let cal: Calibration = defaultCalibration();
+  // Default: self-overlay, not mirrored (see user request).
+  cal.mirror = false;
   let pingTimer = 0;
   let disposed = false;
 
   const placement = {
-    mode: "mirror" as "mirror" | "overlay",
+    mode: "overlay" as "mirror" | "overlay", // default: sobre mí
     fraction: 0.5,
     lateral: 0,
     height: 0,
@@ -42,6 +45,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let phonePos: Vector3 | null = null;
   let markPhoneArmed = false;
   let controlPanel: HTMLElement | null = null;
+
+  // Auto-calibration (overlay): similarity transform solved from 3 point
+  // correspondences — head↔headset and both wrists↔tracked hands — smoothed.
+  const auto = { pos: new Vector3(), quat: new Quaternion(), scale: 1, has: false };
 
   function togglePanel(): void {
     if (!controlPanel) return;
@@ -295,7 +302,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     if (!scene || !skeleton) return;
     // In "overlay" mode the figure is anchored to the headset every frame so it
     // tracks your real position/orientation in the room (6DoF from WebXR).
-    if (placement.mode === "overlay") anchorOverlay();
+    if (placement.mode === "overlay") updateOverlayPlacement();
     const buffered = buffer.peek();
     const age = buffer.ageMs(nowEpochMs());
     if (!buffered || age > cfg.maxPoseAgeMs) {
@@ -308,9 +315,53 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     skeleton.update(mapped.positions, mapped.confidence);
   }
 
-  // Overlay anchor: root sits at the headset's floor-projected position, facing
-  // the headset's forward direction. Feet rest on the floor (the mapper already
-  // offsets them), head lands near yours when the scale is calibrated.
+  // Overlay placement: prefer the auto-calibration (head + both wrists). While
+  // the 3 points are unavailable, fall back to a simple head anchor.
+  function updateOverlayPlacement(): void {
+    if (!scene || !skeleton) return;
+    tryAutoCalibrate();
+    if (auto.has) {
+      skeleton.root.position.copy(auto.pos);
+      skeleton.root.position.y += placement.height; // optional manual nudge
+      skeleton.root.quaternion.copy(auto.quat);
+      skeleton.root.scale.setScalar(auto.scale * placement.scale);
+    } else {
+      anchorOverlay();
+    }
+  }
+
+  // Solve the similarity transform whenever head + both wrists are available,
+  // and smooth it so arm motion doesn't make the figure jump/balloon.
+  function tryAutoCalibrate(): void {
+    if (!scene) return;
+    const buffered = buffer.peek();
+    const wl = buffered?.pose.worldLandmarks;
+    if (!wl || wl.length < POSE_LANDMARK_COUNT) return;
+    const lw = scene.wristWorld("left");
+    const rw = scene.wristWorld("right");
+    if (!lw || !rw) return; // need the 3 points (head is always available)
+
+    const head = scene.readViewerPose().position;
+    const localHead = worldLandmarkToLocal(wl[LM.NOSE], cal.mirror);
+    const localL = worldLandmarkToLocal(wl[LM.LEFT_WRIST], cal.mirror);
+    const localR = worldLandmarkToLocal(wl[LM.RIGHT_WRIST], cal.mirror);
+    const t = similarityFrom3Points([localHead, localL, localR], [head, lw, rw]);
+    if (!t) return;
+    const scale = Math.min(2.5, Math.max(0.3, t.scale)); // guard against spikes
+
+    if (!auto.has) {
+      auto.pos.copy(t.position);
+      auto.quat.copy(t.quaternion);
+      auto.scale = scale;
+      auto.has = true;
+    } else {
+      auto.pos.lerp(t.position, 0.2);
+      auto.quat.slerp(t.quaternion, 0.2);
+      auto.scale += (scale - auto.scale) * 0.12;
+    }
+  }
+
+  // Fallback head anchor (used until the auto-calibration has the 3 points).
   function anchorOverlay(): void {
     if (!scene || !skeleton) return;
     const vp = scene.readViewerPose();
@@ -329,7 +380,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   function recomputeFrame(): void {
     if (!scene || !skeleton) return;
     if (placement.mode === "overlay") {
-      anchorOverlay();
+      updateOverlayPlacement();
       return;
     }
     if (!userPos || !phonePos) return;
@@ -389,13 +440,26 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     };
     const setMode = (m: "mirror" | "overlay") => {
       placement.mode = m;
-      // Mirror reflection applies in "mirror" mode; a self-overlay is direct.
-      cal.mirror = m === "mirror";
+      if (m === "overlay") {
+        // Canonical body-space output; the root transform (auto-calibration)
+        // carries scale/position/orientation.
+        cal.scale = 1;
+        cal.footBaselineLocal = 0;
+        cal.lateralEnabled = false;
+        cal.mirror = false;
+        auto.has = false; // re-solve from the 3 points
+      } else {
+        cal.mirror = true; // mirror reflection; scale/floor come from D capture
+      }
       mapper.reset();
       skeleton?.resetRetained();
       applyModeLabel();
       recomputeFrame();
-      toast(m === "overlay" ? "Overlay anclado al visor. Calibrá la escala (D) parado." : "Modo espejo.");
+      toast(
+        m === "overlay"
+          ? "Sobre mí: se calibra solo con cabeza + manos (mostrá ambas manos al visor)."
+          : "Modo espejo.",
+      );
     };
     modeBtn.addEventListener("click", () => setMode(placement.mode === "mirror" ? "overlay" : "mirror"));
 
@@ -463,6 +527,10 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   }
 
   function captureReference(): void {
+    if (placement.mode === "overlay") {
+      toast("En 'Sobre mí' la escala se calcula automáticamente con las manos.");
+      return;
+    }
     const buffered = buffer.peek();
     if (!buffered) {
       toast("No hay pose recibida todavía.");
