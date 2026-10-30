@@ -41,6 +41,12 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
   let userPos: Vector3 | null = null;
   let phonePos: Vector3 | null = null;
   let markPhoneArmed = false;
+  let controlPanel: HTMLElement | null = null;
+
+  function togglePanel(): void {
+    if (!controlPanel) return;
+    controlPanel.classList.toggle("hidden");
+  }
 
   // --- pairing screen ---
   function renderPairing(prefillPeer = "", prefillToken = ""): void {
@@ -244,11 +250,27 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
 
     scene.onFrame((tSec) => renderFrame(tSec));
 
-    // Controller trigger marks the phone position when armed.
+    // WebXR input: a hand pinch (or a controller trigger) fires 'select'. We
+    // route by handedness: LEFT pinch toggles the calibration panel; RIGHT
+    // pinch / trigger marks the phone when armed. Handedness comes from the
+    // input source captured on 'connected'. These events are not in three's
+    // typed Object3DEventMap, hence the casts.
     for (const c of scene.controllers) {
-      // 'select' is a WebXR controller event not present in three's typed
-      // Object3DEventMap, hence the cast.
-      (c as unknown as { addEventListener: (t: string, cb: () => void) => void }).addEventListener("select", () => {
+      const ev = c as unknown as {
+        addEventListener: (t: string, cb: (e: { data?: { handedness?: string } }) => void) => void;
+        userData: { handedness?: string };
+      };
+      ev.addEventListener("connected", (e) => {
+        ev.userData.handedness = e.data?.handedness;
+      });
+      ev.addEventListener("disconnected", () => {
+        ev.userData.handedness = undefined;
+      });
+      ev.addEventListener("select", () => {
+        if (ev.userData.handedness === "left") {
+          togglePanel();
+          return;
+        }
         if (!markPhoneArmed || !scene) return;
         const hit = scene.controllerFloorHit(0) ?? scene.controllerFloorHit(1);
         if (hit) {
@@ -394,9 +416,11 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
         el("button", { class: "secondary", onclick: () => { cal.lateralEnabled = !cal.lateralEnabled; toast(`Desplazamiento lateral: ${cal.lateralEnabled ? "ON (aprox.)" : "OFF"}`); } }, ["Lateral aprox."]),
       ]),
       el("div", { id: "ql-metrics", class: "metrics" }),
+      el("p", { class: "muted", text: "Pellizco con la mano izquierda: mostrar/ocultar este panel." }),
       el("button", { class: "ghost", onclick: () => void exitStage() }, ["Salir"]),
     ]);
     applyModeLabel();
+    controlPanel = panel;
     host.append(panel);
 
     // live metrics in overlay
@@ -459,6 +483,7 @@ export function mountQuest(container: HTMLElement, route: Route): () => void {
     skeleton?.dispose();
     scene = null;
     skeleton = null;
+    controlPanel = null;
     renderReception();
     const host = page.querySelector("#recv-status");
     if (host) host.replaceChildren(statusPill(link?.state === "open" ? "Emparejado" : "Desconectado", link?.state === "open" ? "ok" : "err"));

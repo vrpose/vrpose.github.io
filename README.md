@@ -163,6 +163,10 @@ Distinguimos tres sistemas de coordenadas y **no** mezclamos uno por otro:
   *Adelante/atrás*. En este modo no hace falta marcar el celular (A/B); solo
   *Capturar escala (D)* parado.
 
+> **Gesto en AR:** un **pellizco con la mano izquierda** muestra/oculta el panel
+> de calibración (requiere *hand-tracking* activo en el visor). El pellizco/gatillo
+> de la mano derecha marca el celular cuando está armado (paso B).
+
 Pasos del modo espejo (controles en el panel, también dentro de AR vía
 *dom-overlay*):
 
